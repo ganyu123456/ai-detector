@@ -1,0 +1,99 @@
+# ============================================================
+# AI 检测平台 — CPU 镜像构建与发布
+# 基础版镜像，使用 CPU 推理（无 CUDA 依赖，体积小，兼容性最广）
+# 构建 linux/amd64 + linux/arm64 多平台，推送至 GitHub Packages
+#
+# 触发条件：
+#   · push main → latest + sha-<short>
+#   · push v*.*.* → 语义化版本 + latest
+#   · PR → 仅构建不推送
+#   · 手动触发
+# ============================================================
+name: Build & Push CPU Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push-cpu:
+    name: Build CPU Image (amd64 + arm64)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ultralytics + PyTorch 体积较大，多平台构建需要充足磁盘空间
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          sudo apt-get clean
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # push main   → latest, sha-<short>
+      # push v1.2.3 → v1.2.3, 1.2, latest, sha-<short>
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push CPU image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=cpu
+          cache-to: type=gha,scope=cpu,mode=max
+
+      - name: Write job summary
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "## ✅ CPU 镜像已推送至 GitHub Packages" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | 说明 |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`ghcr.io/${{ env.IMAGE_NAME }}:latest\` | 最新主线版本 |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`ghcr.io/${{ env.IMAGE_NAME }}:sha-$(git rev-parse --short HEAD)\` | 本次提交 |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> 多平台：\`linux/amd64\` + \`linux/arm64\` | CPU 推理（无 CUDA 依赖）" >> $GITHUB_STEP_SUMMARY

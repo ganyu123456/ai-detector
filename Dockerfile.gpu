@@ -1,0 +1,54 @@
+# ============================================================
+# AI 检测平台 — GPU 版镜像
+# 基于 CUDA 12.2 + cuDNN 8，支持 NVIDIA GPU 加速推理与视频解码
+#
+# 使用要求：
+#   · 宿主机安装 NVIDIA 驱动 525+
+#   · 安装 nvidia-container-toolkit
+#     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/
+#
+# 构建：
+#   docker build -f Dockerfile.gpu -t ai-detector:gpu .
+# ============================================================
+FROM nvidia/cuda:12.2.0-cudnn8-runtime-ubuntu22.04
+
+LABEL maintainer="dairoot"
+
+ENV LANG=C.UTF-8 TZ=Asia/Shanghai
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_INDEX_URL=https://mirrors.tencent.com/pypi/simple
+ENV PIP_TRUSTED_HOST=mirrors.tencent.com
+
+# 安装 Python 3.12 及运行时依赖
+RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.163.com|g' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    software-properties-common curl ca-certificates && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3.12 python3.12-dev python3.12-distutils \
+    libglib2.0-0 libgomp1 libgl1 libxcb1 \
+    ffmpeg && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python  python  /usr/bin/python3.12 1 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY . .
+
+RUN mkdir -p /app/data/pictures
+
+# 安装 CUDA 版本的 PyTorch（用于 GPU 推理）
+# ultralytics 会自动检测 CUDA 可用性并使用 GPU
+RUN pip install -U pip && \
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu122 && \
+    pip install -e . && \
+    pip install --force-reinstall opencv-python-headless
+
+EXPOSE 8090
+
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]

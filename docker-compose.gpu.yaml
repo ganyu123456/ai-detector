@@ -1,0 +1,26 @@
+# ============================================================
+# GPU 覆盖配置（NVIDIA）
+# 用法：docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d
+#
+# 前提条件：
+#   1. 宿主机已安装 NVIDIA 驱动 525+
+#   2. 已安装 nvidia-container-toolkit
+#      https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/
+# ============================================================
+
+services:
+  ai-detector:
+    image: ghcr.io/${{ REPO }}:gpu   # 替换为你的实际镜像地址
+    # 本地构建：build: {context: ., dockerfile: Dockerfile.gpu}
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+    # 申请 GPU 资源
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

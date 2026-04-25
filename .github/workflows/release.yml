@@ -1,0 +1,200 @@
+# ============================================================
+# AI 检测平台 — Release 发布工作流
+#
+# 触发方式：
+#   1. push v*.*.*  → 正式 Release，自动生成 changelog，附带配置包
+#   2. push main    → 滚动预发布 dev-latest（始终是最新代码）
+#   3. 手动触发     → 可指定版本号
+#
+# 发布制品（Release Assets）：
+#   · ai-detector-<ver>.tar.gz        —— 源码 + 配置文件打包
+#   · docker-compose.yaml             —— CPU 版一键部署配置
+#   · docker-compose.gpu.yaml         —— GPU 版覆盖配置
+#
+# 配套 Docker 镜像由 docker-publish-cpu.yml / docker-publish-gpu.yml 负责发布
+# ============================================================
+name: Publish Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 v1.2.0），留空则自动生成 dev 版本号'
+        required: false
+        default: ''
+      prerelease:
+        description: '标记为预发布版本'
+        type: boolean
+        default: true
+
+env:
+  APP_NAME: ai-detector
+
+jobs:
+  release:
+    name: Package & Publish Release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 获取完整历史，用于 changelog 生成
+
+      # ── 确定版本号 ──────────────────────────────────────────────
+      - name: Resolve release version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VER="${GITHUB_REF_NAME}"
+            IS_PRERELEASE="false"
+          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
+            VER="dev-latest"
+            IS_PRERELEASE="true"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VER="${{ github.event.inputs.version }}"
+            IS_PRERELEASE="${{ github.event.inputs.prerelease }}"
+          else
+            VER="dev-${{ github.run_id }}"
+            IS_PRERELEASE="true"
+          fi
+          echo "ver=${VER}"                  >> "$GITHUB_OUTPUT"
+          echo "prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${VER}"             >> "$GITHUB_OUTPUT"
+          echo "Release version: ${VER}"
+
+      # ── 滚动 dev-latest 时强制移动 git tag ─────────────────────
+      - name: Force-move dev-latest tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          git tag -f dev-latest
+          git push -f origin dev-latest
+
+      # ── 替换 docker-compose 中的占位符为实际镜像地址 ────────────
+      - name: Prepare deployment configs
+        run: |
+          REPO="${{ github.repository }}"
+          VER="${{ steps.version.outputs.ver }}"
+          REGISTRY="ghcr.io"
+
+          # 将模板占位符替换为真实值
+          sed -e "s|\\\${{ REPO }}|${REPO}|g" \
+              docker-compose.yaml > dist-docker-compose.yaml
+          sed -e "s|\\\${{ REPO }}|${REPO}|g" \
+              docker-compose.gpu.yaml > dist-docker-compose.gpu.yaml
+
+          echo "docker-compose files prepared"
+
+      # ── 打包源码和配置（tar.gz）────────────────────────────────
+      - name: Create release archive
+        run: |
+          VER="${{ steps.version.outputs.ver }}"
+          ARCHIVE="${{ env.APP_NAME }}-${VER}.tar.gz"
+
+          # 排除 .git、__pycache__、data 目录、dist 等
+          tar -czf "${ARCHIVE}" \
+            --exclude='.git' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='*.pyo' \
+            --exclude='*.egg-info' \
+            --exclude='data' \
+            --exclude='.venv' \
+            --exclude='dist-*' \
+            .
+
+          ls -lh "${ARCHIVE}"
+          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
+        id: archive
+
+      # ── 上传 Artifact（始终保留，方便非 tag 场景下载）──────────
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ steps.version.outputs.ver }}
+          path: |
+            ${{ steps.archive.outputs.archive }}
+            dist-docker-compose.yaml
+            dist-docker-compose.gpu.yaml
+          retention-days: 14
+
+      # ── 发布 GitHub Release ────────────────────────────────────
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: "AI Detector ${{ steps.version.outputs.ver }}"
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}
+          body: |
+            ## 🤖 AI Detector ${{ steps.version.outputs.ver }}
+
+            AI 视频检测分析平台，从标准 RTSP 流中执行 YOLO/入侵/越线检测，提供报警推送和管理界面。
+
+            ---
+
+            ### 🐳 Docker 快速部署
+
+            **CPU 版（推荐默认）**
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.ver }}
+            ```
+
+            下载下方的 `docker-compose.yaml` 后：
+            ```bash
+            docker compose up -d
+            ```
+
+            **GPU 版（NVIDIA）**
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.ver }}-gpu
+            docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml up -d
+            ```
+
+            ---
+
+            ### 📦 发布制品说明
+
+            | 文件 | 说明 |
+            |------|------|
+            | `docker-compose.yaml` | CPU 版一键部署配置（**从此处下载**，镜像地址已填好） |
+            | `docker-compose.gpu.yaml` | GPU 覆盖配置，与上方叠加使用 |
+            | `${{ env.APP_NAME }}-${{ steps.version.outputs.ver }}.tar.gz` | 完整源码包，包含所有配置文件 |
+
+            ---
+
+            ### ⚙️ 与 miloco-camera 网关配合
+
+            1. 确保 miloco-camera 已启动并开启 MediaMTX RTSP 推流
+            2. 在 AI 检测平台 → **流源配置** → 点击"从网关同步"
+            3. 在 **算法配置** 页面为每路流添加检测器并启用
+
+            > 访问地址：**http://\<server\>:8090**
+          files: |
+            ${{ steps.archive.outputs.archive }}
+            dist-docker-compose.yaml
+            dist-docker-compose.gpu.yaml
+
+      # ── Job Summary ────────────────────────────────────────────
+      - name: Write job summary
+        run: |
+          VER="${{ steps.version.outputs.ver }}"
+          echo "## ✅ Release 发布完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 详情 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 版本 | \`${VER}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 预发布 | ${{ steps.version.outputs.prerelease }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | https://github.com/${{ github.repository }}/releases/tag/${VER} |" >> $GITHUB_STEP_SUMMARY
+          echo "| CPU 镜像 | \`ghcr.io/${{ github.repository }}:${VER}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| GPU 镜像 | \`ghcr.io/${{ github.repository }}:${VER}-gpu\` |" >> $GITHUB_STEP_SUMMARY

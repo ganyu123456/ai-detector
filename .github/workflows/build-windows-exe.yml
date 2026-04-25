@@ -1,0 +1,300 @@
+# ============================================================
+# AI 检测平台 — Windows 可执行文件打包 & 自动发布 Release
+#
+# 触发方式：
+#   1. push main      → 滚动预发布 dev-latest（始终覆盖为最新代码）
+#   2. push v*.*.*    → 正式 Release，自动生成 changelog
+#   3. 手动触发       → 可指定版本号
+#
+# 发布产物：
+#   · ai-detector.exe                    —— 单文件可执行程序，双击直接运行
+#   · ai-detector-windows-<ver>.zip      —— 完整包（exe + README + data 目录结构）
+#
+# 注意：
+#   · Windows 版使用 CPU 推理（ultralytics 自动检测 CUDA 可用性）
+#   · 如宿主机安装了 NVIDIA 驱动与 CUDA Toolkit，可自动启用 GPU 加速
+# ============================================================
+name: Build Windows Executable
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 v1.2.0），留空则自动生成 dev 版本号'
+        required: false
+        default: ''
+      prerelease:
+        description: '标记为预发布版本'
+        type: boolean
+        default: true
+
+env:
+  APP_NAME: ai-detector
+
+jobs:
+  build-and-release:
+    name: Build EXE & Publish Release
+    runs-on: windows-latest
+    timeout-minutes: 90   # ultralytics + PyTorch 安装耗时较长
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 确定发布版本号 ────────────────────────────────────────
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VER="${GITHUB_REF_NAME}"
+            IS_PRERELEASE="false"
+          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
+            VER="dev-latest"
+            IS_PRERELEASE="true"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VER="${{ github.event.inputs.version }}"
+            IS_PRERELEASE="${{ github.event.inputs.prerelease }}"
+          else
+            VER="dev-${{ github.run_id }}"
+            IS_PRERELEASE="true"
+          fi
+          echo "ver=${VER}"                  >> "$GITHUB_OUTPUT"
+          echo "prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${VER}"             >> "$GITHUB_OUTPUT"
+          echo "Release version: ${VER} (prerelease=${IS_PRERELEASE})"
+
+      # ── 滚动 dev-latest 时强制移动 git tag ──────────────────
+      - name: Force-move dev-latest tag
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          git tag -f dev-latest
+          git push -f origin dev-latest
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      # ── 安装依赖 ─────────────────────────────────────────────
+      # ultralytics 会拉取 PyTorch（CPU 版），体积较大，耐心等待
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install --force-reinstall opencv-python-headless
+          pip install pyinstaller
+
+      # ── 验证关键依赖 ─────────────────────────────────────────
+      - name: Verify key packages
+        run: |
+          python -c "import av; print('PyAV:', av.__version__)"
+          python -c "import cv2; print('OpenCV:', cv2.__version__)"
+          python -c "import ultralytics; print('ultralytics:', ultralytics.__version__)"
+          python -c "import fastapi; print('FastAPI:', fastapi.__version__)"
+
+      # ── PyInstaller 打包 ─────────────────────────────────────
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller `
+            --onefile `
+            --console `
+            --name "${{ env.APP_NAME }}" `
+            --add-data "app/web/templates;web/templates" `
+            --add-data "app/web/static;web/static" `
+            --collect-all av `
+            --collect-all uvicorn `
+            --collect-all jinja2 `
+            --collect-all markupsafe `
+            --collect-all starlette `
+            --collect-all ultralytics `
+            --copy-metadata fastapi `
+            --copy-metadata uvicorn `
+            --copy-metadata sqlalchemy `
+            --copy-metadata aiosqlite `
+            --copy-metadata ultralytics `
+            --hidden-import fastapi `
+            --hidden-import fastapi.responses `
+            --hidden-import fastapi.staticfiles `
+            --hidden-import fastapi.templating `
+            --hidden-import uvicorn `
+            --hidden-import uvicorn.logging `
+            --hidden-import uvicorn.loops `
+            --hidden-import uvicorn.loops.asyncio `
+            --hidden-import uvicorn.protocols `
+            --hidden-import uvicorn.protocols.http `
+            --hidden-import uvicorn.protocols.http.h11_impl `
+            --hidden-import uvicorn.protocols.websockets `
+            --hidden-import uvicorn.lifespan `
+            --hidden-import uvicorn.lifespan.on `
+            --hidden-import sqlalchemy `
+            --hidden-import sqlalchemy.dialects.sqlite `
+            --hidden-import sqlalchemy.dialects.sqlite.aiosqlite `
+            --hidden-import aiosqlite `
+            --hidden-import aiofiles `
+            --hidden-import psutil `
+            --hidden-import pynvml `
+            --hidden-import cv2 `
+            --hidden-import av `
+            --hidden-import aiohttp `
+            --hidden-import requests `
+            --hidden-import PIL `
+            --hidden-import numpy `
+            --hidden-import multipart `
+            --hidden-import email.mime.text `
+            --hidden-import email.mime.multipart `
+            --hidden-import smtplib `
+            app/main.py
+
+      # ── 检查 EXE ─────────────────────────────────────────────
+      - name: Verify EXE
+        id: exeinfo
+        shell: pwsh
+        run: |
+          $exe = "dist\${{ env.APP_NAME }}.exe"
+          if (-not (Test-Path $exe)) { Write-Error "EXE not found!"; exit 1 }
+          $sizeMB = [math]::Round((Get-Item $exe).length / 1MB, 1)
+          Write-Host "EXE size: ${sizeMB} MB"
+          echo "size_mb=${sizeMB}" >> $env:GITHUB_OUTPUT
+
+      # ── 制作 ZIP 发布包 ───────────────────────────────────────
+      - name: Create ZIP package
+        shell: pwsh
+        run: |
+          $pkg = "dist\${{ env.APP_NAME }}-windows"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          New-Item -ItemType Directory -Force -Path "$pkg\data" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$pkg\data\pictures" | Out-Null
+
+          Copy-Item "dist\${{ env.APP_NAME }}.exe" "$pkg\"
+          Copy-Item "docker-compose.yaml"     "$pkg\" -ErrorAction SilentlyContinue
+
+          $ver = "${{ steps.version.outputs.ver }}"
+          $readme = @"
+          # AI Detector $ver — Windows 版
+
+          ## 快速开始
+
+          1. 确保本机或局域网内已运行 miloco-camera 流媒体网关（或其他 RTSP 源）
+          2. 双击运行 ``${{ env.APP_NAME }}.exe``
+          3. 控制台出现 "AI Detector started" 后，打开浏览器访问 http://localhost:8090
+          4. 进入 **流源配置** → 填写 RTSP 地址（或点击"从网关同步"）
+          5. 进入 **算法配置** → 为每路流添加检测器并启用
+
+          ## GPU 加速（可选）
+
+          如本机安装了 NVIDIA 驱动与 CUDA Toolkit，ultralytics 将自动启用 GPU 推理，
+          无需额外配置。
+
+          ## 目录说明
+
+          ```
+          ai-detector-windows\
+          ├── ai-detector.exe          ← 主程序（双击运行）
+          ├── docker-compose.yaml      ← Docker 部署参考配置
+          └── data\
+              └── pictures\            ← 报警截图自动保存于此
+          ```
+
+          ## 配置说明（环境变量）
+
+          在程序同目录新建 ``.env`` 文件可覆盖默认配置：
+
+          ```
+          GATEWAY_URL=http://localhost:8080    # miloco-camera 网关地址
+          HOST=0.0.0.0
+          PORT=8090
+          YOLO_MODEL=yolo11n.pt               # 可替换为更大模型以提升精度
+          ALERT_COOLDOWN=30                   # 同类报警冷却秒数
+          ```
+          "@ -replace '^          ', ''
+
+          Set-Content -Path "$pkg\README.txt" -Value $readme -Encoding UTF8
+
+          Compress-Archive -Path "$pkg\*" `
+            -DestinationPath "dist\${{ env.APP_NAME }}-windows-${{ steps.version.outputs.ver }}.zip" `
+            -Force
+          Write-Host "ZIP created"
+
+      # ── 上传 Artifact ─────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-windows-${{ steps.version.outputs.ver }}
+          path: |
+            dist/${{ env.APP_NAME }}.exe
+            dist/${{ env.APP_NAME }}-windows-${{ steps.version.outputs.ver }}.zip
+          retention-days: 14
+
+      # ── 发布 GitHub Release ───────────────────────────────────
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: "AI Detector ${{ steps.version.outputs.ver }}"
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}
+          body: |
+            ## 🤖 AI Detector ${{ steps.version.outputs.ver }} — Windows 版
+
+            ### 下载
+
+            | 文件 | 说明 |
+            |------|------|
+            | **`${{ env.APP_NAME }}.exe`** | ✅ 推荐：单文件，双击直接运行 |
+            | `${{ env.APP_NAME }}-windows-${{ steps.version.outputs.ver }}.zip` | 完整包（含 README + data 目录结构） |
+
+            ### 快速使用
+
+            1. 下载 `${{ env.APP_NAME }}.exe`，双击运行
+            2. 浏览器访问 **http://localhost:8090**
+            3. 流源配置 → 填写 RTSP 地址 → 算法配置 → 启用检测器
+
+            ### 与 miloco-camera 配合
+
+            ```
+            miloco-camera（端口 8080）  ──RTSP──▶  ai-detector（端口 8090）
+                  局域网摄像头接入网关                  AI 检测 + 报警管理
+            ```
+
+            在 AI 检测平台流源配置页，点击 **从网关同步** 可一键导入 miloco-camera 的所有摄像头流。
+
+            ### GPU 加速
+
+            Windows EXE 版会自动检测 NVIDIA CUDA 环境，有 GPU 时自动启用加速推理，无需额外配置。
+
+            > EXE 大小：${{ steps.exeinfo.outputs.size_mb }} MB | 平台：Windows x64
+          files: |
+            dist/${{ env.APP_NAME }}.exe
+            dist/${{ env.APP_NAME }}-windows-${{ steps.version.outputs.ver }}.zip
+
+      # ── Job Summary ───────────────────────────────────────────
+      - name: Write job summary
+        shell: pwsh
+        run: |
+          $ver  = "${{ steps.version.outputs.ver }}"
+          $size = "${{ steps.exeinfo.outputs.size_mb }}"
+          $pre  = "${{ steps.version.outputs.prerelease }}"
+          @"
+          ## ✅ Windows EXE 打包完成
+
+          | 项目 | 详情 |
+          |------|------|
+          | 版本 | ``$ver`` |
+          | 文件 | ``${{ env.APP_NAME }}.exe`` |
+          | 大小 | ${size} MB |
+          | 预发布 | $pre |
+          | Release | https://github.com/${{ github.repository }}/releases/tag/$ver |
+          "@ >> $env:GITHUB_STEP_SUMMARY
