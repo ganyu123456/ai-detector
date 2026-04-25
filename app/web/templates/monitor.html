@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}系统监控 - AI 检测平台{% endblock %}
+{% block page_title %}系统监控{% endblock %}
+
+{% block content %}
+<!-- 系统资源 -->
+<div class="stats-grid" id="statsGrid">
+  <div class="stat-card">
+    <div class="stat-value" id="cpuVal">-</div>
+    <div class="stat-label">CPU 使用率</div>
+    <div class="progress mt-2"><div class="progress-bar bg-primary" id="cpuBar" style="width:0%"></div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" id="memVal">-</div>
+    <div class="stat-label">内存使用率</div>
+    <div class="progress mt-2"><div class="progress-bar bg-success" id="memBar" style="width:0%"></div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" id="diskVal">-</div>
+    <div class="stat-label">磁盘使用率</div>
+    <div class="progress mt-2"><div class="progress-bar bg-warning" id="diskBar" style="width:0%"></div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" id="gpuVal">-</div>
+    <div class="stat-label">GPU（NVIDIA）</div>
+    <div class="progress mt-2"><div class="progress-bar bg-danger" id="gpuBar" style="width:0%"></div></div>
+  </div>
+</div>
+
+<!-- 流任务状态 -->
+<div class="row">
+  <div class="col-md-7">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-broadcast"></i> 流任务状态</div>
+      <div class="card-body p-0">
+        <table class="data-table">
+          <thead><tr><th>流名称</th><th>状态</th><th>帧率</th><th>检测</th></tr></thead>
+          <tbody id="streamStatusBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-5">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-gpu-card"></i> GPU 详情</div>
+      <div class="card-body p-0">
+        <table class="data-table" id="gpuTable">
+          <thead><tr><th>显卡</th><th>GPU%</th><th>显存%</th><th>温度</th></tr></thead>
+          <tbody id="gpuBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadMonitor(){
+  const [sys, proc] = await Promise.all([
+    api('GET', '/api/system/stats'),
+    api('GET', '/api/system/processes'),
+  ]);
+
+  // CPU/内存/磁盘
+  document.getElementById('cpuVal').textContent = sys.cpu_percent + '%';
+  document.getElementById('cpuBar').style.width = sys.cpu_percent + '%';
+  document.getElementById('memVal').textContent = sys.memory.percent + '%';
+  document.getElementById('memBar').style.width = sys.memory.percent + '%';
+  document.getElementById('diskVal').textContent = sys.disk.percent + '%';
+  document.getElementById('diskBar').style.width = sys.disk.percent + '%';
+
+  // GPU
+  const gpus = sys.gpus || [];
+  if(gpus.length){
+    const g = gpus[0];
+    document.getElementById('gpuVal').textContent = g.gpu_percent + '%';
+    document.getElementById('gpuBar').style.width = g.gpu_percent + '%';
+    document.getElementById('gpuBody').innerHTML = gpus.map(g=>`
+      <tr><td>${g.name}</td><td>${g.gpu_percent}%</td>
+      <td>${g.memory_percent}%<br><small class="text-muted">${g.memory_used_mb}/${g.memory_total_mb} MB</small></td>
+      <td>${g.temperature??'-'}°C</td></tr>`).join('');
+  } else {
+    document.getElementById('gpuVal').textContent = 'N/A';
+    document.getElementById('gpuBody').innerHTML='<tr><td colspan="4" class="text-muted text-center py-3">无 NVIDIA GPU</td></tr>';
+  }
+
+  // 流状态
+  const streams = proc.streams || [];
+  const workers = proc.detection_workers || [];
+  document.getElementById('streamStatusBody').innerHTML = streams.length
+    ? streams.map(s=>`
+      <tr>
+        <td>${s.name}</td>
+        <td><span class="badge-status badge-${s.status}"><span class="dot dot-${s.status}"></span>${s.status}</span></td>
+        <td>${s.fps ?? 0} fps</td>
+        <td>${workers.includes(s.stream_id)?'<span class="badge bg-success">检测中</span>':'<span class="badge bg-secondary">未配置</span>'}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="4" class="text-muted text-center py-3">无流任务</td></tr>';
+}
+
+loadMonitor();
+setInterval(loadMonitor, 5000);
+</script>
+{% endblock %}

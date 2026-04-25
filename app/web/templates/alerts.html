@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block title %}报警查询 - AI 检测平台{% endblock %}
+{% block page_title %}报警查询{% endblock %}
+
+{% block head %}
+<style>
+.snapshot-img { width: 80px; height: 60px; object-fit: cover; border-radius: 4px; cursor: pointer; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- 统计卡片 -->
+<div class="stats-grid" id="statsGrid">
+  <div class="stat-card"><div class="stat-value" id="statTotal">-</div><div class="stat-label">总报警数</div></div>
+  <div class="stat-card"><div class="stat-value" id="statUnnotified">-</div><div class="stat-label">未推送</div></div>
+  <div class="stat-card"><div class="stat-value" id="statYolo" style="color:var(--accent)">-</div><div class="stat-label">目标检测</div></div>
+  <div class="stat-card"><div class="stat-value" id="statIntrusion" style="color:var(--yellow)">-</div><div class="stat-label">入侵报警</div></div>
+</div>
+
+<!-- 筛选 -->
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="row g-2">
+      <div class="col-md-3">
+        <label class="form-label">流源</label>
+        <select class="form-select form-select-sm" id="filterStream">
+          <option value="">全部</option>
+          {% for s in streams %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">类型</label>
+        <select class="form-select form-select-sm" id="filterType">
+          <option value="">全部</option>
+          <option value="yolo">YOLO</option>
+          <option value="intrusion">入侵</option>
+          <option value="collision">越线</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">开始时间</label>
+        <input type="datetime-local" class="form-control form-control-sm" id="filterStart">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">结束时间</label>
+        <input type="datetime-local" class="form-control form-control-sm" id="filterEnd">
+      </div>
+      <div class="col-md-3 d-flex align-items-end gap-2">
+        <button class="btn btn-primary btn-sm" onclick="loadAlerts(1)"><i class="bi bi-search"></i> 查询</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="clearFilter()">重置</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 报警列表 -->
+<div class="card">
+  <div class="card-header"><i class="bi bi-bell"></i> 报警记录 <span id="totalCount" class="text-muted ms-2" style="font-size:12px"></span></div>
+  <div class="card-body p-0">
+    <table class="data-table">
+      <thead>
+        <tr><th>截图</th><th>流源</th><th>类型</th><th>目标</th><th>置信度</th><th>时间</th><th>操作</th></tr>
+      </thead>
+      <tbody id="alertTableBody"></tbody>
+    </table>
+  </div>
+  <div class="card-footer" id="pagination"></div>
+</div>
+
+<!-- 截图预览 -->
+<div class="modal" id="snapshotModal" tabindex="-1">
+  <div class="modal-dialog modal-lg"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title">截图预览</h5>
+      <button type="button" class="btn-close" onclick="closeModal('snapshotModal')"></button>
+    </div>
+    <div class="modal-body text-center">
+      <img id="snapshotFull" src="" style="max-width:100%;border-radius:6px;">
+    </div>
+  </div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPage = 1;
+
+async function loadStats(){
+  const s = await api('GET', '/api/alerts/stats');
+  document.getElementById('statTotal').textContent = s.total;
+  document.getElementById('statUnnotified').textContent = s.unnotified;
+  document.getElementById('statYolo').textContent = s.by_type?.yolo ?? 0;
+  document.getElementById('statIntrusion').textContent = s.by_type?.intrusion ?? 0;
+}
+
+async function loadAlerts(page=1){
+  currentPage = page;
+  const stream_id = document.getElementById('filterStream').value;
+  const alert_type = document.getElementById('filterType').value;
+  const start = document.getElementById('filterStart').value;
+  const end = document.getElementById('filterEnd').value;
+  const params = new URLSearchParams({page, page_size:20});
+  if(stream_id) params.append('stream_id', stream_id);
+  if(alert_type) params.append('alert_type', alert_type);
+  if(start) params.append('start_time', start);
+  if(end) params.append('end_time', end);
+  const data = await api('GET', '/api/alerts?' + params);
+  renderAlerts(data);
+}
+
+function renderAlerts(data){
+  document.getElementById('totalCount').textContent = `共 ${data.total} 条`;
+  const tbody = document.getElementById('alertTableBody');
+  tbody.innerHTML = '';
+  if(!data.items.length){
+    tbody.innerHTML='<tr><td colspan="7" class="text-center text-muted py-4">暂无报警记录</td></tr>';
+    return;
+  }
+  data.items.forEach(a => {
+    const typeLabel = {yolo:'YOLO目标',intrusion:'入侵',collision:'越线'}[a.type] || a.type;
+    const badgeCls = {yolo:'primary',intrusion:'warning',collision:'danger'}[a.type] || 'secondary';
+    const snapshot = a.snapshot_path
+      ? `<img class="snapshot-img" src="${a.snapshot_path}" onclick="previewSnapshot('${a.snapshot_path}')">`
+      : '<span class="text-muted">-</span>';
+    const ts = a.created_at ? new Date(a.created_at).toLocaleString('zh-CN') : '-';
+    tbody.innerHTML += `
+      <tr>
+        <td>${snapshot}</td>
+        <td>${a.stream_name}</td>
+        <td><span class="badge bg-${badgeCls}">${typeLabel}</span></td>
+        <td>${a.label}</td>
+        <td>${(a.confidence*100).toFixed(1)}%</td>
+        <td style="white-space:nowrap">${ts}</td>
+        <td><button class="btn btn-sm btn-outline-danger" onclick="deleteAlert(${a.id})"><i class="bi bi-trash"></i></button></td>
+      </tr>`;
+  });
+
+  // 分页
+  const pagination = document.getElementById('pagination');
+  let html = '';
+  if(data.pages > 1){
+    html = '<nav><ul class="pagination pagination-sm mb-0">';
+    for(let p=1; p<=data.pages; p++){
+      html += `<li class="page-item ${p==currentPage?'active':''}">
+        <button class="page-link" onclick="loadAlerts(${p})">${p}</button></li>`;
+    }
+    html += '</ul></nav>';
+  }
+  pagination.innerHTML = html;
+}
+
+function previewSnapshot(path){
+  document.getElementById('snapshotFull').src = path;
+  document.getElementById('snapshotModal').classList.add('show');
+}
+function closeModal(id){ document.getElementById(id).classList.remove('show'); }
+
+async function deleteAlert(id){
+  if(!confirm('确认删除此报警记录？')) return;
+  try{ await api('DELETE',`/api/alerts/${id}`); showToast('已删除'); loadAlerts(currentPage); }
+  catch(e){ showToast(e.message,'err'); }
+}
+
+function clearFilter(){
+  ['filterStream','filterType'].forEach(id=>document.getElementById(id).value='');
+  ['filterStart','filterEnd'].forEach(id=>document.getElementById(id).value='');
+  loadAlerts(1);
+}
+
+loadStats();
+loadAlerts(1);
+setInterval(()=>{ loadStats(); loadAlerts(currentPage); }, 15000);
+</script>
+{% endblock %}

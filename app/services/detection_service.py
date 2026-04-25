@@ -1,0 +1,209 @@
+"""
+检测算法调度服务
+订阅 RTSP 流帧，按配置运行各检测器，触发报警
+"""
+import asyncio
+import logging
+import time
+from typing import Dict, List, Optional
+
+import numpy as np
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class DetectionWorker:
+    """单路流的检测工作者"""
+
+    def __init__(self, stream_id: int):
+        self.stream_id = stream_id
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=settings.FRAME_QUEUE_SIZE)
+        self._task: Optional[asyncio.Task] = None
+        self._detectors: List = []
+        self._detection_configs: List[dict] = []
+
+    async def push_frame(self, stream_id: int, frame_jpeg: bytes) -> None:
+        if not self._detectors:
+            return
+        try:
+            self._queue.put_nowait(frame_jpeg)
+        except asyncio.QueueFull:
+            pass
+
+    async def start(self, detection_configs: List[dict]) -> None:
+        self._detection_configs = detection_configs
+        self._load_detectors()
+        self._task = asyncio.create_task(
+            self._run_loop(),
+            name=f"detector-{self.stream_id}",
+        )
+
+    async def stop(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        for det in self._detectors:
+            det.release()
+        self._detectors.clear()
+
+    def _load_detectors(self) -> None:
+        import json
+        from app.detectors.yolo_detector import YoloDetector
+        from app.detectors.opencv_detector import IntrusionDetector, CollisionDetector
+
+        self._detectors.clear()
+        for cfg in self._detection_configs:
+            if not cfg.get("enabled"):
+                continue
+            config = json.loads(cfg.get("config_json", "{}"))
+            dtype = cfg.get("type", "")
+            if dtype == "yolo":
+                det = YoloDetector(config)
+            elif dtype == "intrusion":
+                det = IntrusionDetector(config)
+            elif dtype == "collision":
+                det = CollisionDetector(config)
+            else:
+                continue
+            det._detection_type = dtype
+            det._detection_config_id = cfg.get("id")
+            det._detect_interval = float(config.get("detect_interval", 1.0))
+            self._detectors.append(det)
+
+    async def _run_loop(self) -> None:
+        import cv2
+        from app.services.alert_service import alert_service
+
+        last_detect_ts: Dict[int, float] = {}
+
+        while True:
+            try:
+                frame_jpeg = await self._queue.get()
+                arr = np.frombuffer(frame_jpeg, dtype=np.uint8)
+                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if frame is None:
+                    continue
+
+                for detector in self._detectors:
+                    if not detector._initialized:
+                        try:
+                            detector.initialize()
+                        except Exception as e:
+                            logger.error(f"Detector init failed: {e}")
+                            continue
+
+                    det_id = id(detector)
+                    now = time.time()
+                    interval = getattr(detector, '_detect_interval', 1.0)
+                    if now - last_detect_ts.get(det_id, 0) < interval:
+                        continue
+                    last_detect_ts[det_id] = now
+
+                    try:
+                        detections = detector.detect(frame)
+                    except Exception as e:
+                        logger.warning(f"Detection error: {e}")
+                        continue
+
+                    if not detections:
+                        continue
+
+                    if alert_service.check_cooldown(self.stream_id, detector._detection_type):
+                        continue
+
+                    annotated = detector.draw(frame, detections)
+                    _, jpeg_buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    snapshot_bytes = jpeg_buf.tobytes()
+
+                    top_det = max(detections, key=lambda d: d.confidence)
+                    await alert_service.create(
+                        stream_id=self.stream_id,
+                        alert_type=detector._detection_type,
+                        label=top_det.label,
+                        confidence=top_det.confidence,
+                        snapshot_bytes=snapshot_bytes,
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Detection worker {self.stream_id} error: {e}")
+                await asyncio.sleep(1)
+
+
+class DetectionManager:
+    """全局检测调度管理器"""
+
+    def __init__(self):
+        self._workers: Dict[int, DetectionWorker] = {}
+
+    async def start_stream(self, stream_id: int) -> None:
+        from app.database import AsyncSessionLocal
+        from app.models.detection import DetectionConfig
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(DetectionConfig).where(
+                    DetectionConfig.stream_id == stream_id,
+                    DetectionConfig.enabled == True,
+                )
+            )
+            configs = result.scalars().all()
+
+        if not configs:
+            return
+
+        cfg_dicts = [
+            {"id": c.id, "type": c.type, "enabled": c.enabled, "config_json": c.config_json}
+            for c in configs
+        ]
+
+        await self.stop_stream(stream_id)
+        worker = DetectionWorker(stream_id)
+        self._workers[stream_id] = worker
+        await worker.start(cfg_dicts)
+
+        from app.services.stream_service import stream_manager
+        state = stream_manager.get_state(stream_id)
+        if state:
+            state.add_frame_callback(worker.push_frame)
+
+        logger.info(f"Detection started for stream {stream_id} ({len(cfg_dicts)} detectors)")
+
+    async def stop_stream(self, stream_id: int) -> None:
+        worker = self._workers.pop(stream_id, None)
+        if worker:
+            from app.services.stream_service import stream_manager
+            state = stream_manager.get_state(stream_id)
+            if state:
+                state.remove_frame_callback(worker.push_frame)
+            await worker.stop()
+
+    async def reload_stream(self, stream_id: int) -> None:
+        await self.stop_stream(stream_id)
+        await self.start_stream(stream_id)
+
+    async def start_all_enabled(self) -> None:
+        from app.database import AsyncSessionLocal
+        from app.models.detection import DetectionConfig
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(DetectionConfig.stream_id).where(
+                    DetectionConfig.enabled == True
+                ).distinct()
+            )
+            stream_ids = [r[0] for r in result.all()]
+
+        for sid in stream_ids:
+            await self.start_stream(sid)
+
+
+detection_manager = DetectionManager()

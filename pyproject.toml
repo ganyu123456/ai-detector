@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "ai-detector"
+version = "1.0.0"
+description = "AI 视频检测分析平台 - 从 RTSP 流中进行目标检测、入侵检测、越线检测"
+requires-python = ">=3.10"
+
+dependencies = [
+    # ── Web 框架 ──
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.9",
+    # ── 数据库 ──
+    "sqlalchemy[asyncio]>=2.0.0",
+    "aiosqlite>=0.19.0",
+    # ── AI 检测 ──
+    "ultralytics>=8.3.0",
+    "opencv-python-headless>=4.8.0",
+    "numpy>=1.24.0",
+    # ── 视频拉流 ──
+    "av>=10.0.0",
+    # ── 系统监控 ──
+    "psutil>=5.9.0",
+    "pynvml>=11.5.0",
+    # ── 网络 ──
+    "aiohttp>=3.8.0",
+    "requests>=2.28.0",
+    # ── 其他 ──
+    "pydantic>=2.0.0",
+    "Pillow>=9.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

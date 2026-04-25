@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}算法配置 - AI 检测平台{% endblock %}
+{% block page_title %}算法配置{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <button class="btn btn-primary btn-sm" onclick="openAddModal()">
+    <i class="bi bi-plus-lg"></i> 添加检测配置
+  </button>
+</div>
+
+<div class="card">
+  <div class="card-header"><i class="bi bi-eye"></i> 检测算法列表</div>
+  <div class="card-body p-0">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>关联流</th>
+          <th>类型</th>
+          <th>状态</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% set stream_map = {} %}
+        {% for s in streams %}{% set _ = stream_map.update({s.id: s.name}) %}{% endfor %}
+        {% for d in detections %}
+        <tr id="det-{{ d.id }}">
+          <td><b>{{ d.name }}</b></td>
+          <td>{{ stream_map.get(d.stream_id, 'stream_'+d.stream_id|string) }}</td>
+          <td>
+            {% if d.type == 'yolo' %}<span class="badge bg-primary">YOLO</span>
+            {% elif d.type == 'intrusion' %}<span class="badge bg-warning text-dark">入侵检测</span>
+            {% elif d.type == 'collision' %}<span class="badge bg-danger">越线检测</span>
+            {% else %}<span class="badge bg-secondary">{{ d.type }}</span>{% endif %}
+          </td>
+          <td>
+            {% if d.enabled %}<span class="badge-status badge-running"><span class="dot dot-running"></span>已启用</span>
+            {% else %}<span class="badge-status badge-stopped"><span class="dot dot-stopped"></span>已停用</span>{% endif %}
+          </td>
+          <td>
+            <div class="d-flex gap-1">
+              <button class="btn btn-sm btn-outline-secondary" onclick="toggleDetection({{ d.id }}, {{ 'true' if d.enabled else 'false' }})">
+                {% if d.enabled %}<i class="bi bi-pause"></i>{% else %}<i class="bi bi-play"></i>{% endif %}
+              </button>
+              <button class="btn btn-sm btn-outline-danger" onclick="deleteDetection({{ d.id }})"><i class="bi bi-trash"></i></button>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-4">暂无检测配置，点击"添加检测配置"</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 添加 Modal -->
+<div class="modal" id="addModal" tabindex="-1">
+  <div class="modal-dialog modal-lg"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title"><i class="bi bi-plus-lg me-2"></i>添加检测配置</h5>
+      <button type="button" class="btn-close" onclick="closeModal('addModal')"></button>
+    </div>
+    <div class="modal-body">
+      <div class="row g-3">
+        <div class="col-6">
+          <label class="form-label">名称 *</label>
+          <input type="text" class="form-control" id="addName" placeholder="如：入口人员检测">
+        </div>
+        <div class="col-6">
+          <label class="form-label">关联流 *</label>
+          <select class="form-select" id="addStreamId">
+            {% for s in streams %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-6">
+          <label class="form-label">检测类型 *</label>
+          <select class="form-select" id="addType" onchange="updateConfigTemplate()">
+            <option value="yolo">YOLO 目标检测</option>
+            <option value="intrusion">入侵检测（ROI 区域）</option>
+            <option value="collision">越线检测（虚拟绊线）</option>
+          </select>
+        </div>
+        <div class="col-6">
+          <label class="form-label">立即启用</label>
+          <div class="form-check form-switch mt-2">
+            <input class="form-check-input" type="checkbox" id="addEnabled">
+          </div>
+        </div>
+        <div class="col-12">
+          <label class="form-label">配置 JSON</label>
+          <textarea class="form-control font-mono" id="addConfig" rows="6" style="font-size:12px"></textarea>
+          <small class="text-muted">配置说明请参考 API 文档</small>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline-secondary btn-sm" onclick="closeModal('addModal')">取消</button>
+      <button class="btn btn-primary btn-sm" onclick="addDetection()">添加</button>
+    </div>
+  </div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const TEMPLATES = {
+  yolo: '{"model":"yolo11n.pt","confidence":0.5,"classes":["person"],"iou":0.45,"detect_interval":1.0}',
+  intrusion: '{"roi":[],"min_area":500,"sensitivity":50,"detect_interval":1.0}',
+  collision: '{"lines":[],"direction":"any","min_area":300,"detect_interval":1.0}',
+};
+
+function openAddModal(){
+  updateConfigTemplate();
+  document.getElementById('addModal').classList.add('show');
+}
+function closeModal(id){ document.getElementById(id).classList.remove('show'); }
+
+function updateConfigTemplate(){
+  const t=document.getElementById('addType').value;
+  document.getElementById('addConfig').value=JSON.stringify(JSON.parse(TEMPLATES[t]),null,2);
+}
+
+async function addDetection(){
+  const name=document.getElementById('addName').value.trim();
+  const stream_id=parseInt(document.getElementById('addStreamId').value);
+  const type=document.getElementById('addType').value;
+  const enabled=document.getElementById('addEnabled').checked;
+  let config={};
+  try{config=JSON.parse(document.getElementById('addConfig').value);}catch{showToast('配置 JSON 格式错误','err');return;}
+  if(!name){showToast('名称必填','warn');return;}
+  try{
+    await api('POST','/api/detections',{name,stream_id,type,enabled,config});
+    showToast('添加成功');closeModal('addModal');location.reload();
+  }catch(e){showToast(e.message,'err');}
+}
+
+async function toggleDetection(id, enabled){
+  try{
+    const r=await api('POST',`/api/detections/${id}/toggle`);
+    showToast(r.enabled?'已启用':'已停用');location.reload();
+  }catch(e){showToast(e.message,'err');}
+}
+
+async function deleteDetection(id){
+  if(!confirm('确认删除该检测配置？')) return;
+  try{await api('DELETE',`/api/detections/${id}`);showToast('已删除');location.reload();}
+  catch(e){showToast(e.message,'err');}
+}
+</script>
+{% endblock %}

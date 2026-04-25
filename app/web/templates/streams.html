@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}流源配置 - AI 检测平台{% endblock %}
+{% block page_title %}流源配置{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div class="d-flex gap-2">
+    <button class="btn btn-primary btn-sm" onclick="openAddModal()">
+      <i class="bi bi-plus-lg"></i> 添加流源
+    </button>
+    <button class="btn btn-outline-secondary btn-sm" onclick="syncFromGateway()">
+      <i class="bi bi-arrow-repeat"></i> 从网关同步
+    </button>
+  </div>
+  <span class="text-muted" style="font-size:12px">共 <span id="streamCount">{{ streams|length }}</span> 路流</span>
+</div>
+
+<div class="card">
+  <div class="card-header"><i class="bi bi-broadcast"></i> RTSP 流列表</div>
+  <div class="card-body p-0">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>RTSP 地址</th>
+          <th>状态</th>
+          <th>帧率</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="streamTableBody">
+        {% for s in streams %}
+        <tr id="row-{{ s.id }}">
+          <td><b>{{ s.name }}</b>{% if s.description %}<br><small class="text-muted">{{ s.description }}</small>{% endif %}</td>
+          <td><code>{{ s.rtsp_url }}</code></td>
+          <td>
+            <span class="badge-status badge-{{ s.status }}">
+              <span class="dot dot-{{ s.status }}"></span>{{ s.status }}
+            </span>
+          </td>
+          <td>{{ s.fps }} fps</td>
+          <td>
+            <div class="d-flex gap-1">
+              <button class="btn btn-sm btn-outline-success" onclick="startStream({{ s.id }})"><i class="bi bi-play"></i></button>
+              <button class="btn btn-sm btn-outline-secondary" onclick="stopStream({{ s.id }})"><i class="bi bi-stop"></i></button>
+              <button class="btn btn-sm btn-outline-info" onclick="testStream({{ s.id }})"><i class="bi bi-wifi"></i></button>
+              <button class="btn btn-sm btn-outline-danger" onclick="deleteStream({{ s.id }})"><i class="bi bi-trash"></i></button>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-4">暂无流源，点击"添加流源"或"从网关同步"</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 添加流源 Modal -->
+<div class="modal" id="addModal" tabindex="-1">
+  <div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title"><i class="bi bi-plus-lg me-2"></i>添加流源</h5>
+      <button type="button" class="btn-close" onclick="closeModal('addModal')"></button>
+    </div>
+    <div class="modal-body">
+      <div class="mb-3">
+        <label class="form-label">名称 *</label>
+        <input type="text" class="form-control" id="addName" placeholder="如：前门摄像头">
+      </div>
+      <div class="mb-3">
+        <label class="form-label">RTSP 地址 *</label>
+        <input type="text" class="form-control" id="addRtspUrl" placeholder="rtsp://user:pass@192.168.1.10:554/stream">
+      </div>
+      <div class="mb-3">
+        <label class="form-label">备注</label>
+        <input type="text" class="form-control" id="addDesc" placeholder="可选">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline-secondary btn-sm" onclick="closeModal('addModal')">取消</button>
+      <button class="btn btn-primary btn-sm" onclick="addStream()">添加</button>
+    </div>
+  </div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function openAddModal(){ document.getElementById('addModal').classList.add('show'); }
+function closeModal(id){ document.getElementById(id).classList.remove('show'); }
+
+async function addStream(){
+  const name=document.getElementById('addName').value.trim();
+  const rtsp_url=document.getElementById('addRtspUrl').value.trim();
+  const description=document.getElementById('addDesc').value.trim();
+  if(!name||!rtsp_url){showToast('名称和 RTSP 地址必填','warn');return;}
+  try{
+    await api('POST','/api/streams',{name,rtsp_url,description,enabled:true});
+    showToast('添加成功');closeModal('addModal');location.reload();
+  }catch(e){showToast(e.message,'err');}
+}
+
+async function startStream(id){
+  try{await api('POST',`/api/streams/${id}/start`);showToast('启动中');setTimeout(()=>location.reload(),1500);}
+  catch(e){showToast(e.message,'err');}
+}
+async function stopStream(id){
+  try{await api('POST',`/api/streams/${id}/stop`);showToast('已停止');setTimeout(()=>location.reload(),500);}
+  catch(e){showToast(e.message,'err');}
+}
+async function testStream(id){
+  showToast('测试中...','warn');
+  try{
+    const r=await api('GET',`/api/streams/${id}/test`);
+    showToast(r.ok?'连通正常 ✓':('连接失败: '+r.message), r.ok?'ok':'err');
+  }catch(e){showToast(e.message,'err');}
+}
+async function deleteStream(id){
+  if(!confirm('确认删除该流源及其检测配置？')) return;
+  try{await api('DELETE',`/api/streams/${id}`);showToast('已删除');location.reload();}
+  catch(e){showToast(e.message,'err');}
+}
+
+async function syncFromGateway(){
+  showToast('正在从网关同步...','warn');
+  try{
+    const r=await api('POST','/api/streams/sync/gateway');
+    showToast(`同步完成：新增 ${r.added}，跳过 ${r.skipped}`);
+    if(r.added>0) setTimeout(()=>location.reload(),1000);
+  }catch(e){showToast('同步失败: '+e.message,'err');}
+}
+</script>
+{% endblock %}
