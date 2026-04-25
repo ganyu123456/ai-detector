@@ -105,6 +105,13 @@ jobs:
           python -c "import ultralytics; print('ultralytics:', ultralytics.__version__)"
           python -c "import fastapi; print('FastAPI:', fastapi.__version__)"
 
+      # ── 确保 web/static 目录存在（空目录不会被 git 追踪，PyInstaller 会报错）──
+      - name: Ensure required directories exist
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "app\web\static"   | Out-Null
+          New-Item -ItemType Directory -Force -Path "app\web\templates" | Out-Null
+
       # ── PyInstaller 打包 ─────────────────────────────────────
       - name: Build EXE with PyInstaller
         run: |
