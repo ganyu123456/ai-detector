@@ -1,0 +1,353 @@
+{% extends "base.html" %}
+{% block title %}消息推送 - AI 检测平台{% endblock %}
+{% block page_title %}消息推送配置{% endblock %}
+
+{% block head %}
+<style>
+  .channel-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px;
+  }
+  .channel-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+    transition: border-color .15s;
+  }
+  .channel-card:hover { border-color: var(--border-hover); }
+  .channel-card.disabled { opacity: .55; }
+  .channel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+  }
+  .channel-type-icon { font-size: 20px; margin-right: 8px; }
+  .channel-name { font-size: 13px; font-weight: 600; }
+  .channel-type-label { font-size: 11px; color: var(--text-muted); }
+  .channel-body { padding: 12px 14px; font-size: 12px; color: var(--text-muted); }
+  .channel-footer {
+    display: flex; gap: 6px; padding: 8px 14px;
+    border-top: 1px solid var(--border); background: rgba(255,255,255,.01);
+  }
+
+  /* 渠道类型选择卡片 */
+  .type-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 4px; }
+  .type-card {
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+    cursor: pointer; text-align: center; transition: border-color .12s, background .12s;
+    font-size: 12px; color: var(--text-muted);
+  }
+  .type-card:hover { border-color: var(--accent); color: var(--text); }
+  .type-card.selected { border-color: var(--accent); background: var(--accent-dim); color: var(--text); }
+  .type-card i { display: block; font-size: 22px; margin-bottom: 4px; }
+
+  /* 动态配置表单 */
+  #dynamicFields .field-group { margin-bottom: 12px; }
+  .field-hint { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- 顶部统计 + 新增按钮 -->
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <div class="d-flex gap-3">
+    <span class="stat-card px-3 py-2" style="display:inline-flex;align-items:center;gap:6px">
+      <i class="bi bi-bell-fill" style="color:var(--accent)"></i>
+      <span>已配置 <b id="totalChannels">{{ channels|length }}</b> 个渠道</span>
+    </span>
+    <span class="stat-card px-3 py-2" style="display:inline-flex;align-items:center;gap:6px">
+      <i class="bi bi-check-circle-fill" style="color:var(--green)"></i>
+      <span>启用 <b id="enabledChannels">{{ channels|selectattr('enabled')|list|length }}</b> 个</span>
+    </span>
+  </div>
+  <button class="btn btn-primary btn-sm" onclick="openAddModal()">
+    <i class="bi bi-plus-lg"></i> 添加推送渠道
+  </button>
+</div>
+
+<!-- 渠道卡片列表 -->
+<div class="channel-grid" id="channelGrid">
+{% if channels %}
+{% for ch in channels %}
+<div class="channel-card {% if not ch.enabled %}disabled{% endif %}" id="ch-{{ ch.id }}">
+  <div class="channel-header">
+    <div class="d-flex align-items-center">
+      <span class="channel-type-icon">{{ {
+        'smtp': '📧',
+        'wecom_bot': '💼',
+        'wecom_app': '🏢',
+        'wxpusher': '💬',
+        'qq_webhook': '🐧'
+      }.get(ch.channel_type, '🔔') }}</span>
+      <div>
+        <div class="channel-name">{{ ch.name }}</div>
+        <div class="channel-type-label">{{ {
+          'smtp': 'SMTP 邮件',
+          'wecom_bot': '企业微信机器人',
+          'wecom_app': '企业微信应用',
+          'wxpusher': '微信 WxPusher',
+          'qq_webhook': 'QQ / 自定义 Webhook'
+        }.get(ch.channel_type, ch.channel_type) }}</div>
+      </div>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+      {% if ch.enabled %}
+      <span class="badge-status badge-running">启用</span>
+      {% else %}
+      <span class="badge-status badge-stopped">禁用</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="channel-body">
+    {% if ch.channel_type == 'smtp' %}
+      收件人：{{ ch.config.get('to', '未设置') }}
+    {% elif ch.channel_type in ('wecom_bot', 'qq_webhook') %}
+      Webhook: {{ (ch.config.get('webhook_url','未设置'))[:40] }}{% if ch.config.get('webhook_url','') | length > 40 %}…{% endif %}
+    {% elif ch.channel_type == 'wecom_app' %}
+      Corp ID: {{ ch.config.get('corpid','未设置') }}，收件人：{{ ch.config.get('touser','@all') }}
+    {% elif ch.channel_type == 'wxpusher' %}
+      UIDs: {{ ch.config.get('uids','未设置') }}
+    {% endif %}
+  </div>
+  <div class="channel-footer">
+    <button class="btn btn-sm btn-outline-success flex-fill" onclick="testChannel({{ ch.id }})">
+      <i class="bi bi-send"></i> 测试
+    </button>
+    <button class="btn btn-sm btn-outline-secondary flex-fill" onclick="openEditModal({{ ch.id }})">
+      <i class="bi bi-pencil"></i> 编辑
+    </button>
+    <button class="btn btn-sm btn-outline-danger" onclick="deleteChannel({{ ch.id }})">
+      <i class="bi bi-trash"></i>
+    </button>
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="empty-state" style="grid-column:1/-1">
+  <i class="bi bi-bell-slash"></i>
+  <p>暂未配置推送渠道，点击右上角"添加推送渠道"开始配置。</p>
+</div>
+{% endif %}
+</div>
+
+<!-- ── 添加/编辑渠道 Modal ─────────────────────────────── -->
+<div class="modal" id="channelModal" tabindex="-1">
+  <div class="modal-dialog modal-lg"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title" id="modalTitle"><i class="bi bi-plus-lg me-2"></i>添加推送渠道</h5>
+      <button type="button" class="btn-close" onclick="closeModal('channelModal')"></button>
+    </div>
+    <div class="modal-body">
+      <!-- 渠道名称 -->
+      <div class="mb-3">
+        <label class="form-label">渠道名称 *</label>
+        <input type="text" class="form-control" id="chName" placeholder="如：运维报警机器人">
+      </div>
+
+      <!-- 渠道类型（新增时显示，编辑时隐藏） -->
+      <div class="mb-3" id="typeSelector">
+        <label class="form-label">推送方式 *</label>
+        <div class="type-cards">
+          <div class="type-card" onclick="selectType('smtp')" id="type-smtp">
+            <i class="bi bi-envelope-fill" style="color:#f39c12"></i>SMTP 邮件
+          </div>
+          <div class="type-card" onclick="selectType('wecom_bot')" id="type-wecom_bot">
+            <i class="bi bi-chat-dots-fill" style="color:#07c160"></i>企业微信机器人
+          </div>
+          <div class="type-card" onclick="selectType('wecom_app')" id="type-wecom_app">
+            <i class="bi bi-building-fill" style="color:#1aad19"></i>企业微信应用
+          </div>
+          <div class="type-card" onclick="selectType('wxpusher')" id="type-wxpusher">
+            <i class="bi bi-wechat" style="color:#07c160"></i>微信 WxPusher
+          </div>
+          <div class="type-card" onclick="selectType('qq_webhook')" id="type-qq_webhook">
+            <i class="bi bi-tencent-qq" style="color:#12b7f5"></i>QQ / Webhook
+          </div>
+        </div>
+      </div>
+
+      <!-- 动态配置字段 -->
+      <div id="dynamicFields"></div>
+
+      <!-- 启用开关 -->
+      <div class="form-check form-switch mt-3">
+        <input class="form-check-input" type="checkbox" id="chEnabled" checked>
+        <label class="form-check-label" for="chEnabled" style="font-size:13px">立即启用</label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline-secondary btn-sm" onclick="closeModal('channelModal')">取消</button>
+      <button class="btn btn-primary btn-sm" id="saveBtn" onclick="saveChannel()">
+        <i class="bi bi-check-lg"></i> 保存
+      </button>
+    </div>
+  </div></div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── 状态 ─────────────────────────────────────────────────
+let currentType = '';
+let editChannelId = null;
+let editRawConfig = {};
+
+// ── 渠道类型字段配置 ──────────────────────────────────────
+const TYPE_FIELDS = {
+  smtp: [
+    {key:'host',    label:'SMTP 服务器',  placeholder:'smtp.qq.com',  hint:'QQ邮箱填 smtp.qq.com，163 填 smtp.163.com'},
+    {key:'port',    label:'端口',         placeholder:'465',           hint:'SSL 端口 465，STARTTLS 用 587'},
+    {key:'user',    label:'邮箱账号',     placeholder:'xxx@qq.com'},
+    {key:'password',label:'密码/授权码',  placeholder:'',              type:'password', hint:'QQ邮箱请使用授权码，非登录密码'},
+    {key:'to',      label:'收件人',       placeholder:'a@qq.com,b@163.com', hint:'多个收件人用英文逗号分隔'},
+    {key:'use_ssl', label:'使用 SSL',     type:'checkbox', hint:'465 端口选 SSL，587 端口不选（STARTTLS）'},
+  ],
+  wecom_bot: [
+    {key:'webhook_url', label:'Webhook URL', placeholder:'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx',
+     hint:'在企业微信群 → 群机器人 → 添加机器人 中获取'},
+  ],
+  wecom_app: [
+    {key:'corpid',    label:'企业 ID (corpid)',   placeholder:'ww1234567890abcdef'},
+    {key:'corpsecret',label:'应用 Secret',        placeholder:'xxx', type:'password', hint:'在企业微信管理后台 → 应用 → 应用详情中获取'},
+    {key:'agentid',   label:'应用 AgentId',       placeholder:'1000001'},
+    {key:'touser',    label:'接收人',             placeholder:'@all', hint:'@all 表示全员；也可填成员账号，逗号分隔'},
+  ],
+  wxpusher: [
+    {key:'app_token', label:'App Token', placeholder:'AT_xxxxxxxxxxxxxxxx',
+     hint:'在 wxpusher.zjiecode.com 注册应用后获取'},
+    {key:'uids',      label:'用户 UID', placeholder:'UID_xxxxxxxxxx',
+     hint:'多个 UID 逗号分隔；用户关注公众号后在 WxPusher 后台查看'},
+  ],
+  qq_webhook: [
+    {key:'webhook_url',   label:'Webhook URL',   placeholder:'http://your-qq-bot/send', hint:'填写你的 QQ 机器人 HTTP 接口地址'},
+    {key:'msg_template',  label:'消息模板（可选）', placeholder:'⚠️ {stream_name} 检测到 {label}',
+     hint:'可用变量：{stream_name} {type} {label} {confidence:.1%} {created_at}'},
+  ],
+};
+
+const TYPE_LABELS = {
+  smtp:'SMTP 邮件', wecom_bot:'企业微信机器人',
+  wecom_app:'企业微信应用', wxpusher:'微信 WxPusher', qq_webhook:'QQ / Webhook'
+};
+
+// ── 选择渠道类型 ─────────────────────────────────────────
+function selectType(type){
+  currentType = type;
+  document.querySelectorAll('.type-card').forEach(c=>c.classList.remove('selected'));
+  const card=document.getElementById('type-'+type);
+  if(card) card.classList.add('selected');
+  renderDynamicFields(type, editRawConfig);
+}
+
+// ── 渲染动态字段 ─────────────────────────────────────────
+function renderDynamicFields(type, defaults={}){
+  const container=document.getElementById('dynamicFields');
+  const fields=TYPE_FIELDS[type]||[];
+  if(!fields.length){ container.innerHTML=''; return; }
+
+  container.innerHTML = fields.map(f=>{
+    const val = defaults[f.key] !== undefined ? defaults[f.key] : '';
+    if(f.type==='checkbox'){
+      const checked = val===true || val==='true' || val===undefined ? 'checked' : '';
+      return `<div class="field-group form-check form-switch">
+        <input class="form-check-input" type="checkbox" id="field_${f.key}" ${checked}>
+        <label class="form-check-label" for="field_${f.key}" style="font-size:13px">${f.label}</label>
+        ${f.hint?`<div class="field-hint">${f.hint}</div>`:''}
+      </div>`;
+    }
+    const inputType = f.type||'text';
+    const safeVal = typeof val==='string' && val==='***' ? '' : (val||'');
+    return `<div class="field-group">
+      <label class="form-label">${f.label}${f.key.endsWith('url')||f.key==='password'||f.key==='secret'?'':''}</label>
+      <input type="${inputType}" class="form-control" id="field_${f.key}"
+             value="${safeVal}" placeholder="${f.placeholder||''}">
+      ${f.hint?`<div class="field-hint">${f.hint}</div>`:''}
+    </div>`;
+  }).join('');
+}
+
+// ── 收集当前字段值 ───────────────────────────────────────
+function collectConfig(){
+  const fields=TYPE_FIELDS[currentType]||[];
+  const cfg={};
+  for(const f of fields){
+    const el=document.getElementById('field_'+f.key);
+    if(!el) continue;
+    if(f.type==='checkbox') cfg[f.key]=el.checked;
+    else cfg[f.key]=el.value.trim();
+  }
+  return cfg;
+}
+
+// ── 打开添加弹窗 ─────────────────────────────────────────
+function openAddModal(){
+  editChannelId=null;
+  editRawConfig={};
+  currentType='';
+  document.getElementById('chName').value='';
+  document.getElementById('chEnabled').checked=true;
+  document.getElementById('modalTitle').innerHTML='<i class="bi bi-plus-lg me-2"></i>添加推送渠道';
+  document.getElementById('typeSelector').style.display='';
+  document.getElementById('dynamicFields').innerHTML='';
+  document.querySelectorAll('.type-card').forEach(c=>c.classList.remove('selected'));
+  document.getElementById('channelModal').classList.add('show');
+}
+
+// ── 打开编辑弹窗 ─────────────────────────────────────────
+async function openEditModal(id){
+  try{
+    const data=await api('GET',`/api/notify/${id}`);
+    editChannelId=id;
+    editRawConfig=data.config||{};
+    currentType=data.channel_type;
+    document.getElementById('chName').value=data.name;
+    document.getElementById('chEnabled').checked=data.enabled;
+    document.getElementById('modalTitle').innerHTML='<i class="bi bi-pencil me-2"></i>编辑渠道';
+    document.getElementById('typeSelector').style.display='none';
+    renderDynamicFields(currentType, editRawConfig);
+    document.getElementById('channelModal').classList.add('show');
+  }catch(e){showToast('加载失败: '+e.message,'err');}
+}
+
+function closeModal(id){ document.getElementById(id).classList.remove('show'); }
+
+// ── 保存渠道 ─────────────────────────────────────────────
+async function saveChannel(){
+  const name=document.getElementById('chName').value.trim();
+  const enabled=document.getElementById('chEnabled').checked;
+  if(!name){ showToast('请填写渠道名称','warn'); return; }
+  if(!editChannelId && !currentType){ showToast('请选择推送方式','warn'); return; }
+  const config=collectConfig();
+
+  try{
+    if(editChannelId){
+      await api('PATCH',`/api/notify/${editChannelId}`,{name,enabled,config});
+      showToast('保存成功');
+    }else{
+      await api('POST','/api/notify',{name,channel_type:currentType,enabled,config});
+      showToast('添加成功');
+    }
+    closeModal('channelModal');
+    location.reload();
+  }catch(e){showToast('保存失败: '+e.message,'err');}
+}
+
+// ── 测试渠道 ─────────────────────────────────────────────
+async function testChannel(id){
+  showToast('发送测试消息中…','warn');
+  try{
+    const r=await api('POST',`/api/notify/${id}/test`);
+    showToast(r.ok?'测试发送成功 ✓':'测试失败：'+r.message, r.ok?'ok':'err');
+  }catch(e){showToast('测试失败: '+e.message,'err');}
+}
+
+// ── 删除渠道 ─────────────────────────────────────────────
+async function deleteChannel(id){
+  if(!confirm('确认删除该推送渠道？')) return;
+  try{
+    await api('DELETE',`/api/notify/${id}`);
+    showToast('已删除');
+    location.reload();
+  }catch(e){showToast(e.message,'err');}
+}
+</script>
+{% endblock %}

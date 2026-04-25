@@ -1,9 +1,10 @@
-"""流源管理 API：CRUD + 连通性测试 + 从 miloco-camera 自动同步"""
+"""流源管理 API：CRUD + 连通性测试 + MJPEG 预览 + 从网关自动同步"""
 import asyncio
 from typing import Optional
 
 import aiohttp
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,7 +140,6 @@ async def test_stream_connectivity(stream_id: int, db: AsyncSession = Depends(ge
                 src.rtsp_url,
                 options={"rtsp_transport": "tcp", "stimeout": "3000000"},
             )
-            # 尝试读取一帧
             for packet in container.demux(video=0):
                 container.close()
                 return True, "连通正常"
@@ -147,19 +147,72 @@ async def test_stream_connectivity(stream_id: int, db: AsyncSession = Depends(ge
             return False, str(e)
         return False, "无帧数据"
 
-    import asyncio
     loop = asyncio.get_running_loop()
     ok, msg = await loop.run_in_executor(None, _check)
     return {"ok": ok, "message": msg, "rtsp_url": src.rtsp_url}
 
 
+@router.get("/{stream_id}/snapshot")
+async def get_snapshot(stream_id: int):
+    """获取最新一帧 JPEG 快照"""
+    state = stream_manager.get_state(stream_id)
+    if not state:
+        raise HTTPException(404, "Stream not found")
+    if not state.latest_frame:
+        raise HTTPException(503, "No frame available yet")
+    return Response(content=state.latest_frame, media_type="image/jpeg")
+
+
+@router.get("/{stream_id}/mjpeg")
+async def mjpeg_stream(stream_id: int):
+    """MJPEG 实时预览流（浏览器直接播放）"""
+    state = stream_manager.get_state(stream_id)
+    if not state:
+        raise HTTPException(404, "Stream not found")
+
+    async def _generator():
+        last_frame: Optional[bytes] = None
+        idle_ticks = 0
+        while True:
+            frame = state.latest_frame
+            if frame and frame is not last_frame:
+                last_frame = frame
+                idle_ticks = 0
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + frame
+                    + b"\r\n"
+                )
+            else:
+                idle_ticks += 1
+                # 流停止超过 10 秒则结束推流
+                if state.status not in ("running", "starting") and idle_ticks > 200:
+                    break
+            await asyncio.sleep(0.05)  # 最高 20 fps
+
+    return StreamingResponse(
+        _generator(),
+        media_type="multipart/x-mixed-replace;boundary=frame",
+    )
+
+
+class GatewaySyncBody(BaseModel):
+    gateway_url: Optional[str] = None  # 不填则使用环境变量默认值
+
+
 @router.post("/sync/gateway")
-async def sync_from_gateway(db: AsyncSession = Depends(get_db)):
-    """从 miloco-camera 网关自动同步摄像头流源"""
+async def sync_from_gateway(
+    body: GatewaySyncBody = GatewaySyncBody(),
+    db: AsyncSession = Depends(get_db),
+):
+    """从 miloco-camera 网关自动同步摄像头流源，支持自定义网关地址"""
+    gateway_url = (body.gateway_url or settings.GATEWAY_URL).rstrip("/")
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{settings.GATEWAY_URL}/api/streams",
+                f"{gateway_url}/api/streams",
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
@@ -177,7 +230,6 @@ async def sync_from_gateway(db: AsyncSession = Depends(get_db)):
             skipped += 1
             continue
 
-        # 检查是否已存在（按 rtsp_url 去重）
         existing = (await db.execute(
             select(StreamSource).where(StreamSource.rtsp_url == rtsp_url)
         )).scalar_one_or_none()
@@ -200,4 +252,9 @@ async def sync_from_gateway(db: AsyncSession = Depends(get_db)):
         added += 1
 
     await db.commit()
-    return {"added": added, "skipped": skipped, "total_from_gateway": len(streams)}
+    return {
+        "added": added,
+        "skipped": skipped,
+        "total_from_gateway": len(streams),
+        "gateway_url": gateway_url,
+    }

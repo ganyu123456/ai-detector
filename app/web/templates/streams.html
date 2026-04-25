@@ -8,7 +8,7 @@
     <button class="btn btn-primary btn-sm" onclick="openAddModal()">
       <i class="bi bi-plus-lg"></i> 添加流源
     </button>
-    <button class="btn btn-outline-secondary btn-sm" onclick="syncFromGateway()">
+    <button class="btn btn-outline-secondary btn-sm" onclick="openSyncModal()">
       <i class="bi bi-arrow-repeat"></i> 从网关同步
     </button>
   </div>
@@ -56,6 +56,33 @@
   </div>
 </div>
 
+<!-- 从网关同步 Modal -->
+<div class="modal" id="syncModal" tabindex="-1">
+  <div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title"><i class="bi bi-arrow-repeat me-2"></i>从网关同步流源</h5>
+      <button type="button" class="btn-close" onclick="closeModal('syncModal')"></button>
+    </div>
+    <div class="modal-body">
+      <div class="mb-3">
+        <label class="form-label">网关地址</label>
+        <input type="text" class="form-control" id="syncGatewayUrl"
+               value="{{ default_gateway_url }}"
+               placeholder="http://localhost:8080">
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">
+          miloco-camera 流媒体网关的访问地址，同步后将自动导入所有在线摄像头流。
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline-secondary btn-sm" onclick="closeModal('syncModal')">取消</button>
+      <button class="btn btn-primary btn-sm" onclick="syncFromGateway()">
+        <i class="bi bi-arrow-repeat"></i> 开始同步
+      </button>
+    </div>
+  </div></div>
+</div>
+
 <!-- 添加流源 Modal -->
 <div class="modal" id="addModal" tabindex="-1">
   <div class="modal-dialog"><div class="modal-content">
@@ -88,6 +115,7 @@
 {% block scripts %}
 <script>
 function openAddModal(){ document.getElementById('addModal').classList.add('show'); }
+function openSyncModal(){ document.getElementById('syncModal').classList.add('show'); }
 function closeModal(id){ document.getElementById(id).classList.remove('show'); }
 
 async function addStream(){
@@ -123,10 +151,12 @@ async function deleteStream(id){
 }
 
 async function syncFromGateway(){
+  const gateway_url = document.getElementById('syncGatewayUrl').value.trim();
+  closeModal('syncModal');
   showToast('正在从网关同步...','warn');
   try{
-    const r=await api('POST','/api/streams/sync/gateway');
-    showToast(`同步完成：新增 ${r.added}，跳过 ${r.skipped}`);
+    const r=await api('POST','/api/streams/sync/gateway',{gateway_url});
+    showToast(`同步完成：新增 ${r.added}，跳过 ${r.skipped}（来自 ${r.gateway_url}）`);
     if(r.added>0) setTimeout(()=>location.reload(),1000);
   }catch(e){showToast('同步失败: '+e.message,'err');}
 }

@@ -156,10 +156,16 @@
     <div class="sb-brand-sub">AI Detector v1.0</div>
   </div>
 
-  <div class="sb-section">主功能</div>
+  <div class="sb-section">视频</div>
+  <a href="/preview"    class="sb-link {% if active=='preview'    %}active{% endif %}"><i class="bi bi-camera-video"></i>视频预览</a>
   <a href="/streams"    class="sb-link {% if active=='streams'    %}active{% endif %}"><i class="bi bi-broadcast"></i>流源配置</a>
+
+  <div class="sb-section">AI 分析</div>
   <a href="/detections" class="sb-link {% if active=='detections' %}active{% endif %}"><i class="bi bi-eye"></i>算法配置</a>
   <a href="/alerts"     class="sb-link {% if active=='alerts'     %}active{% endif %}"><i class="bi bi-bell"></i>报警查询</a>
+
+  <div class="sb-section">系统</div>
+  <a href="/notify"     class="sb-link {% if active=='notify'     %}active{% endif %}"><i class="bi bi-send"></i>消息推送</a>
   <a href="/monitor"    class="sb-link {% if active=='monitor'    %}active{% endif %}"><i class="bi bi-speedometer2"></i>系统监控</a>
 
   <div class="sb-section">工具</div>

@@ -76,12 +76,14 @@ from app.api.streams import router as streams_router
 from app.api.detections import router as detections_router
 from app.api.alerts import router as alerts_router
 from app.api.system import router as system_router
+from app.api.notify import router as notify_router
 from app.api.web_routes import router as web_router
 
 app.include_router(streams_router)
 app.include_router(detections_router)
 app.include_router(alerts_router)
 app.include_router(system_router)
+app.include_router(notify_router)
 app.include_router(web_router)
 
 

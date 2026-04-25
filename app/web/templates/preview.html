@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+{% block title %}视频预览 - AI 检测平台{% endblock %}
+{% block page_title %}视频预览{% endblock %}
+
+{% block head %}
+<style>
+  .preview-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+  }
+  @media (max-width: 600px) { .preview-grid { grid-template-columns: 1fr; } }
+
+  .stream-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .stream-card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,.02);
+  }
+  .stream-card-header .name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .stream-card-body { position: relative; background: #000; aspect-ratio: 16/9; }
+
+  .video-wrap { width: 100%; height: 100%; }
+  .video-wrap img {
+    width: 100%; height: 100%; object-fit: contain;
+    display: block;
+  }
+  .placeholder {
+    width: 100%; height: 100%; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px;
+    color: #484f58; font-size: 13px;
+  }
+  .placeholder i { font-size: 36px; }
+
+  .stream-card-footer {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px; font-size: 12px; color: var(--text-muted);
+    border-top: 1px solid var(--border);
+  }
+  .fps-badge { font-size: 11px; color: var(--green); }
+
+  /* 全屏遮罩 */
+  #fullscreen-overlay {
+    display: none; position: fixed; inset: 0; z-index: 9000;
+    background: #000; align-items: center; justify-content: center;
+  }
+  #fullscreen-overlay.show { display: flex; }
+  #fullscreen-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #fullscreen-close {
+    position: absolute; top: 14px; right: 18px;
+    background: rgba(255,255,255,.1); border: none; color: #fff;
+    font-size: 24px; cursor: pointer; border-radius: 6px; padding: 2px 10px;
+  }
+  #fullscreen-label {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.6); color: #fff; font-size: 13px;
+    padding: 4px 14px; border-radius: 20px;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center gap-2 mb-3">
+  <!-- 布局切换 -->
+  <div class="btn-group btn-group-sm" id="layoutGroup">
+    <button class="btn btn-outline-secondary active" onclick="setLayout(2)" title="双列">
+      <i class="bi bi-grid"></i>
+    </button>
+    <button class="btn btn-outline-secondary" onclick="setLayout(3)" title="三列">
+      <i class="bi bi-grid-3x3"></i>
+    </button>
+    <button class="btn btn-outline-secondary" onclick="setLayout(1)" title="单列">
+      <i class="bi bi-layout-sidebar-inset-reverse"></i>
+    </button>
+  </div>
+  <button class="btn btn-sm btn-outline-secondary ms-1" onclick="refreshAll()">
+    <i class="bi bi-arrow-clockwise"></i> 刷新全部
+  </button>
+  <span class="text-muted ms-2" style="font-size:12px">共 {{ streams|length }} 路流</span>
+</div>
+
+{% if streams %}
+<div class="preview-grid" id="previewGrid">
+  {% for s in streams %}
+  <div class="stream-card" id="card-{{ s.id }}">
+    <div class="stream-card-header">
+      <div class="name">
+        <span class="dot dot-{{ s.status }}"></span>
+        {{ s.name }}
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <span class="fps-badge" id="fps-{{ s.id }}">{{ s.fps }} fps</span>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-1" title="快照"
+                onclick="takeSnapshot({{ s.id }}, '{{ s.name }}')">
+          <i class="bi bi-camera" style="font-size:12px"></i>
+        </button>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-1" title="全屏"
+                onclick="openFullscreen({{ s.id }}, '{{ s.name }}')">
+          <i class="bi bi-fullscreen" style="font-size:12px"></i>
+        </button>
+        {% if s.status == 'running' %}
+        <span class="badge-status badge-running" style="font-size:10px">运行中</span>
+        {% elif s.status == 'error' %}
+        <span class="badge-status badge-error" style="font-size:10px">错误</span>
+        {% else %}
+        <span class="badge-status badge-stopped" style="font-size:10px">{{ s.status }}</span>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="stream-card-body">
+      {% if s.status == 'running' or s.status == 'starting' %}
+      <div class="video-wrap">
+        <img id="mjpeg-{{ s.id }}"
+             src="/api/streams/{{ s.id }}/mjpeg"
+             alt="{{ s.name }}"
+             onerror="onImgError({{ s.id }})"
+             loading="lazy">
+      </div>
+      {% else %}
+      <div class="placeholder" id="placeholder-{{ s.id }}">
+        <i class="bi bi-camera-video-off"></i>
+        <span>流未运行（{{ s.status }}）</span>
+        {% if s.status == 'stopped' %}
+        <button class="btn btn-sm btn-outline-success mt-1"
+                onclick="startAndPlay({{ s.id }})">
+          <i class="bi bi-play"></i> 启动流
+        </button>
+        {% endif %}
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="stream-card-footer">
+      <code style="font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        {{ s.rtsp_url }}
+      </code>
+      <span>ID: {{ s.id }}</span>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% else %}
+<div class="empty-state">
+  <i class="bi bi-camera-video"></i>
+  <p>暂无流源。请先在<a href="/streams">流源配置</a>页面添加摄像头。</p>
+</div>
+{% endif %}
+
+<!-- 全屏预览 -->
+<div id="fullscreen-overlay">
+  <button id="fullscreen-close" onclick="closeFullscreen()">✕</button>
+  <img id="fullscreen-img" src="" alt="">
+  <div id="fullscreen-label"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── 布局控制 ─────────────────────────────────────────────
+const colMap = {1:'repeat(1,1fr)', 2:'repeat(auto-fill,minmax(460px,1fr))', 3:'repeat(auto-fill,minmax(320px,1fr))'};
+function setLayout(n){
+  document.getElementById('previewGrid').style.gridTemplateColumns = colMap[n] || colMap[2];
+  document.querySelectorAll('#layoutGroup .btn').forEach(b=>b.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+}
+
+// ── 刷新全部（重新挂载 <img> src 以重连 MJPEG 流）────────
+function refreshAll(){
+  document.querySelectorAll('[id^="mjpeg-"]').forEach(img=>{
+    const src = img.src;
+    img.src = '';
+    setTimeout(()=>img.src=src+'?t='+Date.now(), 100);
+  });
+  showToast('已刷新全部预览流');
+}
+
+// ── 图片加载失败（流未就绪）─────────────────────────────
+function onImgError(id){
+  const img = document.getElementById('mjpeg-'+id);
+  if(!img) return;
+  img.style.display='none';
+  const body = img.closest('.stream-card-body');
+  if(!body.querySelector('.placeholder')){
+    const ph=document.createElement('div');
+    ph.className='placeholder';
+    ph.innerHTML='<i class="bi bi-hourglass-split"></i><span>等待视频流…</span>';
+    body.appendChild(ph);
+  }
+  // 5 秒后自动重试
+  setTimeout(()=>{
+    img.style.display='';
+    img.src='/api/streams/'+id+'/mjpeg?t='+Date.now();
+    const ph=body.querySelector('.placeholder');
+    if(ph && !ph.querySelector('button')) ph.remove();
+  }, 5000);
+}
+
+// ── 启动流并开始播放 ─────────────────────────────────────
+async function startAndPlay(id){
+  try{
+    await api('POST',`/api/streams/${id}/start`);
+    showToast('流已启动，等待视频…');
+    setTimeout(()=>location.reload(), 2000);
+  }catch(e){showToast('启动失败: '+e.message,'err');}
+}
+
+// ── 截图下载 ─────────────────────────────────────────────
+async function takeSnapshot(id, name){
+  try{
+    const r = await fetch(`/api/streams/${id}/snapshot`);
+    if(!r.ok){ showToast('截图失败，流可能未运行','warn'); return; }
+    const blob = await r.blob();
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=`snapshot_${name}_${Date.now()}.jpg`;
+    a.click();
+    showToast('截图已下载');
+  }catch(e){showToast(e.message,'err');}
+}
+
+// ── 全屏预览 ─────────────────────────────────────────────
+function openFullscreen(id, name){
+  const overlay=document.getElementById('fullscreen-overlay');
+  const img=document.getElementById('fullscreen-img');
+  img.src=`/api/streams/${id}/mjpeg?t=${Date.now()}`;
+  document.getElementById('fullscreen-label').textContent=name;
+  overlay.classList.add('show');
+}
+function closeFullscreen(){
+  const overlay=document.getElementById('fullscreen-overlay');
+  overlay.classList.remove('show');
+  document.getElementById('fullscreen-img').src='';
+}
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeFullscreen(); });
+
+// ── FPS 定期刷新 ─────────────────────────────────────────
+async function refreshFps(){
+  try{
+    const data = await api('GET','/api/streams');
+    data.streams.forEach(s=>{
+      const el=document.getElementById('fps-'+s.id);
+      if(el) el.textContent=s.fps+' fps';
+    });
+  }catch(_){}
+}
+setInterval(refreshFps, 5000);
+</script>
+{% endblock %}

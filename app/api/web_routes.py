@@ -22,8 +22,27 @@ router = APIRouter(tags=["web"])
 
 
 @router.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    return templates.TemplateResponse(request=request, name="streams.html")
+async def index(request: Request, db: AsyncSession = Depends(get_db)):
+    return await preview_page(request, db)
+
+
+@router.get("/preview", response_class=HTMLResponse)
+async def preview_page(request: Request, db: AsyncSession = Depends(get_db)):
+    from app.models.stream_source import StreamSource
+    from app.services.stream_service import stream_manager
+    sources = (await db.execute(select(StreamSource))).scalars().all()
+    items = []
+    for src in sources:
+        d = src.to_dict()
+        state = stream_manager.get_state(src.id)
+        d["status"] = state.status if state else "stopped"
+        d["fps"] = state.fps if state else 0.0
+        items.append(d)
+    return templates.TemplateResponse(
+        request=request,
+        name="preview.html",
+        context={"streams": items, "active": "preview"},
+    )
 
 
 @router.get("/streams", response_class=HTMLResponse)
@@ -41,7 +60,11 @@ async def streams_page(request: Request, db: AsyncSession = Depends(get_db)):
     return templates.TemplateResponse(
         request=request,
         name="streams.html",
-        context={"streams": items, "active": "streams"},
+        context={
+            "streams": items,
+            "active": "streams",
+            "default_gateway_url": __import__('app.config', fromlist=['settings']).settings.GATEWAY_URL,
+        },
     )
 
 
@@ -70,6 +93,19 @@ async def alerts_page(request: Request, db: AsyncSession = Depends(get_db)):
         request=request,
         name="alerts.html",
         context={"streams": [s.to_dict() for s in sources], "active": "alerts"},
+    )
+
+
+@router.get("/notify", response_class=HTMLResponse)
+async def notify_page(request: Request, db: AsyncSession = Depends(get_db)):
+    from app.models.notify_config import NotifyChannel
+    channels = (await db.execute(
+        select(NotifyChannel).order_by(NotifyChannel.id)
+    )).scalars().all()
+    return templates.TemplateResponse(
+        request=request,
+        name="notify.html",
+        context={"channels": [ch.to_dict() for ch in channels], "active": "notify"},
     )
 
 

@@ -15,6 +15,7 @@ async def init_db() -> None:
     from app.models.stream_source import StreamSource
     from app.models.detection import DetectionConfig
     from app.models.alert import Alert
+    from app.models.notify_config import NotifyChannel  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
