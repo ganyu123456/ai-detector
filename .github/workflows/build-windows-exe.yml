@@ -163,6 +163,7 @@ jobs:
             --hidden-import email.mime.text `
             --hidden-import email.mime.multipart `
             --hidden-import smtplib `
+            --hidden-import dotenv `
             app/main.py
 
       # ── 检查 EXE ─────────────────────────────────────────────

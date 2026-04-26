@@ -79,7 +79,8 @@ class AlertService:
         filename = f"stream{stream_id}_{alert_type}_{ts}.jpg"
         filepath = day_dir / filename
         filepath.write_bytes(data)
-        return str(filepath.relative_to(settings.DATA_DIR.parent))
+        # 返回 API URL，前端可直接用于 <img src>
+        return f"/api/alerts/picture/{date_str}/{filename}"
 
     async def list_alerts(
         self,
@@ -138,9 +139,11 @@ class AlertService:
             if not alert:
                 return False
             if alert.snapshot_path:
-                p = Path(alert.snapshot_path)
-                if p.exists():
-                    p.unlink(missing_ok=True)
+                # snapshot_path 格式：/api/alerts/picture/{date}/{filename}
+                parts = [p for p in alert.snapshot_path.split("/") if p]
+                if len(parts) >= 2:
+                    file_path = settings.PICTURES_DIR / parts[-2] / parts[-1]
+                    file_path.unlink(missing_ok=True)
             await db.delete(alert)
             await db.commit()
         return True

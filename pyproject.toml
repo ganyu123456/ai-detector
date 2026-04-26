@@ -32,6 +32,7 @@ dependencies = [
     # ── 其他 ──
     "pydantic>=2.0.0",
     "Pillow>=9.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [tool.setuptools.packages.find]

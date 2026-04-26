@@ -1,9 +1,32 @@
 import os
+import sys
 from pathlib import Path
 
 
+def _load_dotenv() -> None:
+    """加载 .env 文件（优先从 EXE 同目录读取，普通 Python 从项目根目录读取）"""
+    try:
+        from dotenv import load_dotenv
+        if getattr(sys, 'frozen', False):
+            env_path = Path(sys.executable).parent / ".env"
+        else:
+            env_path = Path(__file__).parent.parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+    except ImportError:
+        pass
+
+
+_load_dotenv()
+
+
 def _get_data_dir() -> Path:
-    return Path(os.getenv("DATA_DIR", str(Path(__file__).parent.parent / "data")))
+    if os.getenv("DATA_DIR"):
+        return Path(os.environ["DATA_DIR"])
+    if getattr(sys, 'frozen', False):
+        # PyInstaller --onefile: __file__ 指向临时解压目录，数据应存在 EXE 同目录
+        return Path(sys.executable).parent / "data"
+    return Path(__file__).parent.parent / "data"
 
 
 DATA_DIR = _get_data_dir()
