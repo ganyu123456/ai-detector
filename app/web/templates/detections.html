@@ -41,7 +41,7 @@
           </td>
           <td>
             <div class="d-flex gap-1">
-              <button class="btn btn-sm btn-outline-info" onclick="openEditModal({{ d.id }}, {{ d|tojson }})"><i class="bi bi-pencil"></i></button>
+              <button class="btn btn-sm btn-outline-info" data-det="{{ d|tojson|e }}" onclick="openEditModal(this)"><i class="bi bi-pencil"></i></button>
               <button class="btn btn-sm btn-outline-secondary" onclick="toggleDetection({{ d.id }}, {{ 'true' if d.enabled else 'false' }})">
                 {% if d.enabled %}<i class="bi bi-pause"></i>{% else %}<i class="bi bi-play"></i>{% endif %}
               </button>
@@ -175,7 +175,9 @@ async function addDetection(){
   }catch(e){showToast(e.message,'err');}
 }
 
-function openEditModal(id, det){
+function openEditModal(btn){
+  const det = JSON.parse(btn.dataset.det);
+  const id = det.id;
   document.getElementById('editId').value = id;
   document.getElementById('editName').value = det.name;
   document.getElementById('editEnabled').checked = det.enabled;
