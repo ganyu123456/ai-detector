@@ -41,6 +41,7 @@
           </td>
           <td>
             <div class="d-flex gap-1">
+              <button class="btn btn-sm btn-outline-info" onclick="openEditModal({{ d.id }}, {{ d|tojson }})"><i class="bi bi-pencil"></i></button>
               <button class="btn btn-sm btn-outline-secondary" onclick="toggleDetection({{ d.id }}, {{ 'true' if d.enabled else 'false' }})">
                 {% if d.enabled %}<i class="bi bi-pause"></i>{% else %}<i class="bi bi-play"></i>{% endif %}
               </button>
@@ -102,6 +103,43 @@
     </div>
   </div></div>
 </div>
+<!-- 编辑 Modal -->
+<div class="modal" id="editModal" tabindex="-1">
+  <div class="modal-dialog modal-lg"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title"><i class="bi bi-pencil me-2"></i>编辑检测配置</h5>
+      <button type="button" class="btn-close" onclick="closeModal('editModal')"></button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="editId">
+      <div class="row g-3">
+        <div class="col-6">
+          <label class="form-label">名称 *</label>
+          <input type="text" class="form-control" id="editName">
+        </div>
+        <div class="col-6">
+          <label class="form-label">检测类型</label>
+          <input type="text" class="form-control" id="editType" disabled style="color:var(--text-muted)">
+        </div>
+        <div class="col-6">
+          <label class="form-label">启用</label>
+          <div class="form-check form-switch mt-2">
+            <input class="form-check-input" type="checkbox" id="editEnabled">
+          </div>
+        </div>
+        <div class="col-12">
+          <label class="form-label">配置 JSON</label>
+          <textarea class="form-control font-mono" id="editConfig" rows="6" style="font-size:12px"></textarea>
+          <small class="text-muted">配置说明请参考 API 文档</small>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline-secondary btn-sm" onclick="closeModal('editModal')">取消</button>
+      <button class="btn btn-primary btn-sm" onclick="saveEdit()">保存</button>
+    </div>
+  </div></div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -135,6 +173,30 @@ async function addDetection(){
     await api('POST','/api/detections',{name,stream_id,type,enabled,config});
     showToast('添加成功');closeModal('addModal');location.reload();
   }catch(e){showToast(e.message,'err');}
+}
+
+function openEditModal(id, det){
+  document.getElementById('editId').value = id;
+  document.getElementById('editName').value = det.name;
+  document.getElementById('editEnabled').checked = det.enabled;
+  const typeLabel = {yolo:'YOLO 目标检测', intrusion:'入侵检测（ROI 区域）', collision:'越线检测（虚拟绊线）'};
+  document.getElementById('editType').value = typeLabel[det.type] || det.type;
+  document.getElementById('editConfig').value = JSON.stringify(det.config, null, 2);
+  document.getElementById('editModal').classList.add('show');
+}
+
+async function saveEdit(){
+  const id = document.getElementById('editId').value;
+  const name = document.getElementById('editName').value.trim();
+  const enabled = document.getElementById('editEnabled').checked;
+  let config = {};
+  try{ config = JSON.parse(document.getElementById('editConfig').value); }
+  catch{ showToast('配置 JSON 格式错误','err'); return; }
+  if(!name){ showToast('名称必填','warn'); return; }
+  try{
+    await api('PATCH', `/api/detections/${id}`, {name, enabled, config});
+    showToast('保存成功'); closeModal('editModal'); location.reload();
+  }catch(e){ showToast(e.message,'err'); }
 }
 
 async function toggleDetection(id, enabled){

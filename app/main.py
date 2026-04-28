@@ -8,7 +8,10 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 from app.config import settings
 from app.database import init_db
@@ -18,6 +21,29 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """拦截所有请求，未登录时 Web 页面重定向 /login，API 返回 401。"""
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # 放行登录页及静态资源
+        if path == "/login" or path.startswith("/static"):
+            return await call_next(request)
+
+        # 校验 session cookie
+        from app.auth import verify_session_token
+        token = request.cookies.get("session")
+        user = verify_session_token(token) if token else None
+
+        if user is None:
+            if path.startswith("/api"):
+                return JSONResponse({"detail": "未登录"}, status_code=401)
+            return RedirectResponse(url="/login", status_code=302)
+
+        return await call_next(request)
 
 
 def _get_static_dir() -> Path:
@@ -62,6 +88,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

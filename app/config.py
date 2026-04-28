@@ -73,5 +73,10 @@ class Settings:
     # 帧队列大小
     FRAME_QUEUE_SIZE: int = int(os.getenv("FRAME_QUEUE_SIZE", "2"))
 
+    # 认证
+    ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
+    ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "luculent1!")
+    SESSION_SECRET: str = os.getenv("SESSION_SECRET", "ai-detector-secret-change-me")
+
 
 settings = Settings()

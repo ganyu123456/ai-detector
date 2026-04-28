@@ -8,6 +8,8 @@
   qq_webhook - QQ 机器人 / 自定义 Webhook
 """
 import asyncio
+import base64
+import hashlib
 import logging
 import smtplib
 import ssl
@@ -76,13 +78,13 @@ class NotifyService:
         if t == "smtp":
             await self._send_smtp(cfg, alert, snapshot_bytes)
         elif t == "wecom_bot":
-            await self._send_wecom_bot(cfg, alert)
+            await self._send_wecom_bot(cfg, alert, snapshot_bytes)
         elif t == "wecom_app":
-            await self._send_wecom_app(cfg, alert)
+            await self._send_wecom_app(cfg, alert, snapshot_bytes)
         elif t == "wxpusher":
-            await self._send_wxpusher(cfg, alert)
+            await self._send_wxpusher(cfg, alert, snapshot_bytes)
         elif t == "qq_webhook":
-            await self._send_qq_webhook(cfg, alert)
+            await self._send_qq_webhook(cfg, alert, snapshot_bytes)
         else:
             logger.warning(f"Unknown channel type: {t}")
 
@@ -111,6 +113,11 @@ class NotifyService:
             f"[AI检测报警] {alert.get('stream_name','未知')} - "
             f"{alert.get('type','')} 检测到 {alert.get('label','')}"
         )
+
+        snapshot_section = ""
+        if snapshot_bytes:
+            snapshot_section = '<p><img src="cid:snapshot.jpg" style="max-width:600px;border-radius:6px;border:1px solid #ddd;"></p>'
+
         body = f"""<html><body>
 <h2 style="color:#e74c3c;">⚠️ AI 视频检测报警通知</h2>
 <table border="1" cellpadding="8" style="border-collapse:collapse;">
@@ -120,21 +127,23 @@ class NotifyService:
   <tr><td><b>置信度</b></td><td>{alert.get('confidence',0):.1%}</td></tr>
   <tr><td><b>报警时间</b></td><td>{alert.get('created_at','')}</td></tr>
 </table>
+{snapshot_section}
 <p>请及时查看 AI 检测平台。</p>
 </body></html>"""
 
-        msg = MIMEMultipart("mixed")
+        msg = MIMEMultipart("related")
         msg["From"] = user
         msg["To"] = to
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "html", "utf-8"))
 
         if snapshot_bytes:
-            part = MIMEBase("image", "jpeg")
-            part.set_payload(snapshot_bytes)
-            encoders.encode_base64(part)
-            part.add_header("Content-Disposition", "attachment", filename="snapshot.jpg")
-            msg.attach(part)
+            img_part = MIMEBase("image", "jpeg")
+            img_part.set_payload(snapshot_bytes)
+            encoders.encode_base64(img_part)
+            img_part.add_header("Content-ID", "<snapshot.jpg>")
+            img_part.add_header("Content-Disposition", "inline", filename="snapshot.jpg")
+            msg.attach(img_part)
 
         ctx = ssl.create_default_context()
         if use_ssl:
@@ -152,7 +161,9 @@ class NotifyService:
 
     # ── 企业微信机器人 ───────────────────────────────────────────────
 
-    async def _send_wecom_bot(self, cfg: dict, alert: dict) -> None:
+    async def _send_wecom_bot(
+        self, cfg: dict, alert: dict, snapshot_bytes: Optional[bytes] = None
+    ) -> None:
         webhook_url = cfg.get("webhook_url", "")
         if not webhook_url:
             raise ValueError("企业微信机器人 webhook_url 未配置")
@@ -177,11 +188,29 @@ class NotifyService:
                 if body.get("errcode", 0) != 0:
                     raise RuntimeError(f"WeCom bot error: {body}")
 
+            if snapshot_bytes:
+                img_b64 = base64.b64encode(snapshot_bytes).decode()
+                img_md5 = hashlib.md5(snapshot_bytes).hexdigest()
+                img_payload = {
+                    "msgtype": "image",
+                    "image": {"base64": img_b64, "md5": img_md5},
+                }
+                async with s.post(
+                    webhook_url,
+                    json=img_payload,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp2:
+                    body2 = await resp2.json()
+                    if body2.get("errcode", 0) != 0:
+                        logger.warning(f"WeCom bot image send failed: {body2}")
+
         logger.info("WeChat Work bot alert sent")
 
     # ── 企业微信应用消息 ─────────────────────────────────────────────
 
-    async def _send_wecom_app(self, cfg: dict, alert: dict) -> None:
+    async def _send_wecom_app(
+        self, cfg: dict, alert: dict, snapshot_bytes: Optional[bytes] = None
+    ) -> None:
         corpid = cfg.get("corpid", "")
         corpsecret = cfg.get("corpsecret", "")
         agentid = cfg.get("agentid", "")
@@ -202,11 +231,12 @@ class NotifyService:
                     raise RuntimeError(f"WeCom gettoken error: {t}")
                 access_token = t["access_token"]
 
-            # 发送消息
             send_url = (
                 "https://qyapi.weixin.qq.com/cgi-bin/message/send"
                 f"?access_token={access_token}"
             )
+
+            # 发送文字消息
             content = (
                 f"⚠️ AI检测报警\n"
                 f"视频流：{alert.get('stream_name','未知')}\n"
@@ -231,11 +261,53 @@ class NotifyService:
                 if body.get("errcode", 0) != 0:
                     raise RuntimeError(f"WeCom app send error: {body}")
 
+            # 上传截图并发送图片消息
+            if snapshot_bytes:
+                upload_url = (
+                    "https://qyapi.weixin.qq.com/cgi-bin/media/upload"
+                    f"?access_token={access_token}&type=image"
+                )
+                form = aiohttp.FormData()
+                form.add_field(
+                    "media",
+                    snapshot_bytes,
+                    filename="snapshot.jpg",
+                    content_type="image/jpeg",
+                )
+                async with s.post(
+                    upload_url,
+                    data=form,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    up = await r.json()
+                    media_id = up.get("media_id")
+
+                if media_id:
+                    img_payload = {
+                        "touser": touser,
+                        "msgtype": "image",
+                        "agentid": int(agentid),
+                        "image": {"media_id": media_id},
+                        "safe": 0,
+                    }
+                    async with s.post(
+                        send_url,
+                        json=img_payload,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as r:
+                        body2 = await r.json()
+                        if body2.get("errcode", 0) != 0:
+                            logger.warning(f"WeCom app image send failed: {body2}")
+                else:
+                    logger.warning(f"WeCom app media upload failed: {up}")
+
         logger.info(f"WeChat Work app message sent to {touser}")
 
     # ── 微信个人推送（WxPusher）──────────────────────────────────────
 
-    async def _send_wxpusher(self, cfg: dict, alert: dict) -> None:
+    async def _send_wxpusher(
+        self, cfg: dict, alert: dict, snapshot_bytes: Optional[bytes] = None
+    ) -> None:
         app_token = cfg.get("app_token", "")
         uids = cfg.get("uids", "")  # 逗号分隔的 UID
 
@@ -243,6 +315,15 @@ class NotifyService:
             raise ValueError("WxPusher 配置不完整（需要 app_token / uids）")
 
         uid_list = [u.strip() for u in uids.split(",") if u.strip()]
+
+        snapshot_html = ""
+        if snapshot_bytes:
+            img_b64 = base64.b64encode(snapshot_bytes).decode()
+            snapshot_html = (
+                f'<p><img src="data:image/jpeg;base64,{img_b64}" '
+                f'style="max-width:100%;border-radius:6px;"></p>'
+            )
+
         content = (
             f"<h3>⚠️ AI检测报警</h3>"
             f"<p><b>视频流</b>：{alert.get('stream_name','未知')}</p>"
@@ -250,6 +331,7 @@ class NotifyService:
             f"<p><b>目标</b>：{alert.get('label','')}</p>"
             f"<p><b>置信度</b>：{alert.get('confidence',0):.1%}</p>"
             f"<p><b>时间</b>：{alert.get('created_at','')}</p>"
+            f"{snapshot_html}"
         )
         payload = {
             "appToken": app_token,
@@ -272,7 +354,9 @@ class NotifyService:
 
     # ── QQ / 自定义 Webhook ──────────────────────────────────────────
 
-    async def _send_qq_webhook(self, cfg: dict, alert: dict) -> None:
+    async def _send_qq_webhook(
+        self, cfg: dict, alert: dict, snapshot_bytes: Optional[bytes] = None
+    ) -> None:
         webhook_url = cfg.get("webhook_url", "")
         if not webhook_url:
             raise ValueError("QQ Webhook URL 未配置")
@@ -292,7 +376,9 @@ class NotifyService:
         except Exception:
             content = f"AI检测报警 - {alert.get('stream_name','未知')}"
 
-        payload = {"message": content, "content": content, "text": content}
+        payload: dict = {"message": content, "content": content, "text": content}
+        if snapshot_bytes:
+            payload["image_base64"] = base64.b64encode(snapshot_bytes).decode()
 
         async with aiohttp.ClientSession() as s:
             async with s.post(
