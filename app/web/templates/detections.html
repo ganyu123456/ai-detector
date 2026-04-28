@@ -41,7 +41,7 @@
           </td>
           <td>
             <div class="d-flex gap-1">
-              <button class="btn btn-sm btn-outline-info" data-det="{{ d|tojson|e }}" onclick="openEditModal(this)"><i class="bi bi-pencil"></i></button>
+              <button class="btn btn-sm btn-outline-info" onclick="openEditModal({{ d.id }})"><i class="bi bi-pencil"></i></button>
               <button class="btn btn-sm btn-outline-secondary" onclick="toggleDetection({{ d.id }}, {{ 'true' if d.enabled else 'false' }})">
                 {% if d.enabled %}<i class="bi bi-pause"></i>{% else %}<i class="bi bi-play"></i>{% endif %}
               </button>
@@ -144,6 +144,11 @@
 
 {% block scripts %}
 <script>
+const DET_MAP = {};
+{% for d in detections %}
+DET_MAP[{{ d.id }}] = {{ d|tojson }};
+{% endfor %}
+
 const TEMPLATES = {
   yolo: '{"model":"yolo11n.pt","confidence":0.5,"classes":["person"],"iou":0.45,"detect_interval":1.0}',
   intrusion: '{"roi":[],"min_area":500,"sensitivity":50,"detect_interval":1.0}',
@@ -175,9 +180,8 @@ async function addDetection(){
   }catch(e){showToast(e.message,'err');}
 }
 
-function openEditModal(btn){
-  const det = JSON.parse(btn.dataset.det);
-  const id = det.id;
+function openEditModal(id){
+  const det = DET_MAP[id];
   document.getElementById('editId').value = id;
   document.getElementById('editName').value = det.name;
   document.getElementById('editEnabled').checked = det.enabled;
