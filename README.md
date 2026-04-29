@@ -72,6 +72,8 @@ docker compose up -d --build
 | `GATEWAY_URL` | `http://localhost:8080` | miloco-camera 网关地址，用于自动同步流源 |
 | `YOLO_MODEL` | `yolo11n.pt` | YOLO 默认模型文件名 |
 | `YOLO_CONFIDENCE` | `0.5` | 默认置信度阈值 |
+| `YOLO_DEVICE` | `auto` | 推理设备：`auto`（自动选 CUDA→CPU）\| `cpu` \| `cuda` \| `0` |
+| `FRAME_QUEUE_SIZE` | `2` | 检测帧队列深度；GPU 推理时可调高为 `5` 避免漏检 |
 | `ALERT_COOLDOWN` | `10` | 同一路流同类型报警冷却时间（秒） |
 | `SMTP_ENABLED` | `false` | 是否启用邮件推送 |
 | `SMTP_HOST` | `smtp.qq.com` | SMTP 服务器 |
@@ -166,7 +168,26 @@ RTSP 地址：rtsp://192.168.1.1:8554/camera1
 
 ## GPU 加速
 
-如需 NVIDIA GPU 解码和推理，在 docker-compose.yaml 中取消注释：
+### Windows EXE
+
+EXE 内置 ONNX Runtime，**自动检测 CUDA 环境**：
+
+- 有 NVIDIA 驱动 + CUDA Toolkit 12.x → 自动使用 GPU 推理和硬件视频解码
+- 无 GPU → 自动降级 CPU，无需任何配置
+
+如需强制指定，在 EXE 同目录新建 `.env` 文件：
+
+```
+YOLO_DEVICE=cuda        # 强制 GPU
+# YOLO_DEVICE=cpu       # 强制 CPU
+FRAME_QUEUE_SIZE=5      # GPU 快时可调高，避免漏检（默认 2）
+```
+
+启动时控制台会打印实际使用的设备（`ONNXRuntime providers` 和 `YOLO_DEVICE`），可据此确认 GPU 是否生效。
+
+### Docker（GPU）
+
+在 `docker-compose.yaml` 中取消注释：
 
 ```yaml
     deploy:
@@ -178,7 +199,7 @@ RTSP 地址：rtsp://192.168.1.1:8554/camera1
               capabilities: [gpu]
 ```
 
-并在检测配置的 JSON 中指定 `"device": "cuda"`：
+`YOLO_DEVICE` 默认为 `auto`，有 GPU 时自动启用，无需额外设置。也可在算法配置 JSON 中手动指定：
 
 ```json
 {"model": "yolo11n.pt", "device": "cuda", "confidence": 0.5}

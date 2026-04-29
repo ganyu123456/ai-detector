@@ -2,9 +2,15 @@
 AI 检测分析平台 - FastAPI 应用入口
 """
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# 确保项目根目录在 sys.path 中，兼容 `python app/main.py` 和 `python -m app.main` 两种运行方式
+_project_root = str(Path(__file__).parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,9 +61,65 @@ def _get_static_dir() -> Path:
 STATIC_DIR = _get_static_dir()
 
 
+def _log_hardware_info() -> None:
+    """启动时打印硬件与运行时信息，方便排查 GPU 未生效问题。"""
+    import platform
+    logger.info(f"Platform: {platform.system()} {platform.machine()}")
+
+    # CUDA / GPU
+    try:
+        import torch
+        cuda_ok = torch.cuda.is_available()
+        if cuda_ok:
+            gpu_name = torch.cuda.get_device_name(0)
+            logger.info(f"PyTorch CUDA: available, GPU={gpu_name}")
+        else:
+            logger.info("PyTorch CUDA: not available (CPU-only build or no GPU)")
+    except ImportError:
+        logger.info("PyTorch: not installed")
+
+    # ONNX Runtime
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        logger.info(f"ONNXRuntime providers: {providers}")
+    except ImportError:
+        logger.info("ONNXRuntime: not installed")
+
+    # PyAV codec 探测
+    try:
+        import av
+        from app.services.stream_service import _pick_video_decoder
+        decoder, use_hw = _pick_video_decoder()
+        hw_codecs = [c for c in av.codec.codecs_available if "cuvid" in c or "vaapi" in c or "videotoolbox" in c or "v4l2" in c]
+        logger.info(f"PyAV {av.__version__}: hw_codecs={hw_codecs or 'none'}, selected={decoder} (hw={use_hw})")
+    except Exception as e:
+        logger.info(f"PyAV probe failed: {e}")
+
+    # YOLO 设备配置
+    from app.config import settings
+    logger.info(f"YOLO_DEVICE config: {settings.YOLO_DEVICE}")
+
+    # pynvml GPU 状态
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        count = pynvml.nvmlDeviceGetCount()
+        for i in range(count):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            name = pynvml.nvmlDeviceGetName(h)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+            logger.info(f"GPU {i}: {name}, VRAM={mem.total // 1024 // 1024}MB")
+        pynvml.nvmlShutdown()
+    except Exception:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── 启动 ──────────────────────────────────────────────────
+    _log_hardware_info()
+
     logger.info("Initializing database...")
     await init_db()
 

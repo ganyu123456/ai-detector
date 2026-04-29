@@ -89,10 +89,12 @@ jobs:
           cache: 'pip'
 
       # ── 安装依赖 ─────────────────────────────────────────────
-      # ultralytics 会拉取 PyTorch（CPU 版），体积较大，耐心等待
+      # onnxruntime-gpu 支持 CUDA 推理，体积远小于 CUDA PyTorch
+      # 运行时若机器有 NVIDIA 驱动 + CUDA，自动启用 GPU；否则降级 CPU
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install onnxruntime-gpu
           pip install -e .
           pip install --force-reinstall opencv-python-headless
           pip install pyinstaller
@@ -104,6 +106,7 @@ jobs:
           python -c "import cv2; print('OpenCV:', cv2.__version__)"
           python -c "import ultralytics; print('ultralytics:', ultralytics.__version__)"
           python -c "import fastapi; print('FastAPI:', fastapi.__version__)"
+          python -c "import onnxruntime as ort; print('ONNXRuntime:', ort.__version__, 'providers:', ort.get_available_providers())"
 
       # ── 确保 web/static 目录存在（空目录不会被 git 追踪，PyInstaller 会报错）──
       - name: Ensure required directories exist
@@ -127,11 +130,13 @@ jobs:
             --collect-all markupsafe `
             --collect-all starlette `
             --collect-all ultralytics `
+            --collect-all onnxruntime `
             --copy-metadata fastapi `
             --copy-metadata uvicorn `
             --copy-metadata sqlalchemy `
             --copy-metadata aiosqlite `
             --copy-metadata ultralytics `
+            --copy-metadata onnxruntime `
             --hidden-import fastapi `
             --hidden-import fastapi.responses `
             --hidden-import fastapi.staticfiles `
@@ -164,6 +169,8 @@ jobs:
             --hidden-import email.mime.multipart `
             --hidden-import smtplib `
             --hidden-import dotenv `
+            --hidden-import onnxruntime `
+            --hidden-import onnxruntime.capi `
             app/main.py
 
       # ── 检查 EXE ─────────────────────────────────────────────
@@ -201,10 +208,14 @@ jobs:
           4. 进入 **流源配置** → 填写 RTSP 地址（或点击"从网关同步"）
           5. 进入 **算法配置** → 为每路流添加检测器并启用
 
-          ## GPU 加速（可选）
+          ## GPU 加速（自动）
 
-          如本机安装了 NVIDIA 驱动与 CUDA Toolkit，ultralytics 将自动启用 GPU 推理，
-          无需额外配置。
+          本程序内置 ONNX Runtime，启动时自动检测 GPU 环境：
+          - 已安装 NVIDIA 驱动 + CUDA Toolkit 12.x → 自动启用 GPU 推理和硬件视频解码
+          - 无 GPU → 自动降级 CPU，无需任何操作
+
+          启动时控制台会打印 "ONNXRuntime providers" 行，
+          包含 "CUDAExecutionProvider" 表示 GPU 已生效。
 
           ## 目录说明
 
@@ -225,6 +236,8 @@ jobs:
           HOST=0.0.0.0
           PORT=8090
           YOLO_MODEL=yolo11n.pt               # 可替换为更大模型以提升精度
+          YOLO_DEVICE=auto                    # auto | cpu | cuda（默认 auto）
+          FRAME_QUEUE_SIZE=5                  # GPU 推理时可调高为 5（默认 2）
           ALERT_COOLDOWN=30                   # 同类报警冷却秒数
           ```
           "@ -replace '^          ', ''
@@ -281,7 +294,13 @@ jobs:
 
             ### GPU 加速
 
-            Windows EXE 版会自动检测 NVIDIA CUDA 环境，有 GPU 时自动启用加速推理，无需额外配置。
+            EXE 内置 ONNX Runtime，启动时自动检测 CUDA 环境：
+            - 有 NVIDIA 驱动 + CUDA Toolkit 12.x → 自动启用 GPU 推理 + 硬件视频解码（hevc_cuvid）
+            - 无 GPU → 自动降级 CPU，无需任何配置
+            
+            控制台日志中 `ONNXRuntime providers: ['CUDAExecutionProvider', ...]` 表示 GPU 已生效。
+            
+            可在 EXE 同目录 `.env` 中设置 `YOLO_DEVICE=cpu` 强制使用 CPU，或 `FRAME_QUEUE_SIZE=5` 在 GPU 模式下减少漏检。
 
             > EXE 大小：${{ steps.exeinfo.outputs.size_mb }} MB | 平台：Windows x64
           files: |

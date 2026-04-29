@@ -1,6 +1,6 @@
 """
 RTSP 流服务：从网关或其他 RTSP 源拉取视频流，解码帧并分发给检测器。
-支持 GPU 硬件解码（NVIDIA CUDA/CUVID）和 CPU 软解码降级。
+支持 GPU 硬件解码（NVIDIA CUVID）和 CPU 软解码自动降级。
 """
 import asyncio
 import logging
@@ -18,7 +18,7 @@ class StreamState:
     rtsp_url: str
     status: str = "stopped"       # stopped | starting | running | error
     error_msg: str = ""
-    latest_frame: Optional[bytes] = None
+    latest_frame: Optional[bytes] = None          # 原始分辨率 JPEG，供预览和检测共用
     frame_event: asyncio.Event = field(default_factory=asyncio.Event)
     fps: float = 0.0
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -114,47 +114,72 @@ class StreamManager:
         def _pull_and_decode():
             import av
             import cv2
-            import numpy as np
 
-            decoder_name = _pick_hevc_decoder()
-            logger.info(f"Stream {state.stream_id}: opening {state.rtsp_url} with {decoder_name}")
+            decoder_name, use_hw = _pick_video_decoder()
+            logger.info(
+                f"Stream {state.stream_id}: opening {state.rtsp_url} "
+                f"decoder={decoder_name} hw={use_hw}"
+            )
 
-            try:
-                container = av.open(
-                    state.rtsp_url,
-                    options={
-                        "rtsp_transport": "tcp",
-                        "stimeout": "5000000",
-                        "fflags": "nobuffer",
-                        "flags": "low_delay",
-                    },
-                )
-
-                for packet in container.demux(video=0):
-                    if not state.status == "running" and state.status != "starting":
-                        break
+            def _open_container(force_sw: bool = False):
+                """打开 RTSP 容器，可选强制软解。"""
+                opts = {
+                    "rtsp_transport": "tcp",
+                    "stimeout": "5000000",
+                    "fflags": "nobuffer",
+                    "flags": "low_delay",
+                }
+                container = av.open(state.rtsp_url, options=opts)
+                if not force_sw and use_hw:
+                    # 尝试为视频流指定硬件解码器
                     try:
-                        for frame in packet.decode():
-                            bgr = frame.to_ndarray(format="bgr24")
-                            ret, jpeg = cv2.imencode(
-                                ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80]
-                            )
-                            if ret:
-                                jpeg_bytes = jpeg.tobytes()
-                                asyncio.run_coroutine_threadsafe(
-                                    _dispatch_frame(jpeg_bytes), loop
-                                )
-                    except Exception:
+                        vstream = container.streams.video[0]
+                        vstream.codec_context.codec = av.Codec(decoder_name, "r")
+                    except Exception as e:
+                        logger.debug(f"HW codec attach failed ({e}), will use default")
+                return container
+
+            # 优先尝试硬解，失败则软解重试
+            for attempt, force_sw in enumerate([False, True]):
+                if attempt == 1:
+                    logger.info(f"Stream {state.stream_id}: retrying with software decode")
+                try:
+                    container = _open_container(force_sw=force_sw)
+                    _decode_loop(container, cv2)
+                    container.close()
+                    break
+                except Exception as e:
+                    if attempt == 0 and use_hw:
+                        logger.warning(f"Stream {state.stream_id} hw decode error: {e}, falling back to SW")
                         continue
-                container.close()
-            except Exception as e:
-                asyncio.run_coroutine_threadsafe(_set_error(str(e)), loop)
+                    asyncio.run_coroutine_threadsafe(_set_error(str(e)), loop)
+                    break
+
+        def _decode_loop(container, cv2):
+            for packet in container.demux(video=0):
+                if state.status not in ("running", "starting"):
+                    break
+                try:
+                    for frame in packet.decode():
+                        bgr = frame.to_ndarray(format="bgr24")
+                        ret, jpeg = cv2.imencode(
+                            ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85]
+                        )
+                        if ret:
+                            jpeg_bytes = jpeg.tobytes()
+                            asyncio.run_coroutine_threadsafe(
+                                _dispatch_frame(jpeg_bytes), loop
+                            )
+                except Exception:
+                    continue
 
         async def _dispatch_frame(data: bytes) -> None:
             state.latest_frame = data
             state.update_fps()
+            # 通知所有等待新帧的协程（MJPEG generator 使用）
             state.frame_event.set()
             state.frame_event.clear()
+            # 异步分发给检测 worker（不阻塞预览）
             for cb in list(state._frame_callbacks):
                 try:
                     await cb(state.stream_id, data)
@@ -181,32 +206,38 @@ class StreamManager:
                 state.status = "error"
 
 
-def _pick_hevc_decoder() -> str:
-    """选择最优 HEVC 解码器"""
-    import subprocess
-    import av
-
-    def try_codec(name: str) -> bool:
-        try:
-            av.Codec(name, "r")
-            return True
-        except Exception:
-            return False
-
+def _pick_video_decoder() -> tuple[str, bool]:
+    """
+    探测最优视频解码器。
+    返回 (decoder_name, use_hardware)。
+    优先使用 PyAV 内置的 codec 注册表，不依赖外部 ffmpeg 命令。
+    """
     try:
-        result = subprocess.run(
-            ["ffmpeg", "-hwaccels"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3,
-        )
-        hw_list = [x.strip() for x in result.stdout.strip().split("\n")[1:] if x.strip()]
-    except Exception:
-        hw_list = []
+        import av
+        available: set = av.codec.codecs_available
 
-    if ("cuda" in hw_list or "cuvid" in hw_list) and try_codec("hevc_cuvid"):
-        return "hevc_cuvid"
-    if try_codec("hevc_v4l2m2m"):
-        return "hevc_v4l2m2m"
-    return "hevc"
+        # NVIDIA CUVID（Windows/Linux）
+        if "hevc_cuvid" in available:
+            return "hevc_cuvid", True
+        if "h264_cuvid" in available:
+            return "h264_cuvid", True
+
+        # VA-API（Linux）
+        if "hevc_vaapi" in available:
+            return "hevc_vaapi", True
+
+        # VideoToolbox（macOS）
+        if "hevc_videotoolbox" in available:
+            return "hevc_videotoolbox", True
+
+        # V4L2（嵌入式 Linux）
+        if "hevc_v4l2m2m" in available:
+            return "hevc_v4l2m2m", True
+
+    except Exception as e:
+        logger.debug(f"Codec probe failed: {e}")
+
+    return "hevc", False
 
 
 stream_manager = StreamManager()

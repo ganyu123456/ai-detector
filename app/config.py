@@ -66,6 +66,8 @@ class Settings:
     # YOLO 默认参数
     YOLO_MODEL: str = os.getenv("YOLO_MODEL", "yolo11n.pt")
     YOLO_CONFIDENCE: float = float(os.getenv("YOLO_CONFIDENCE", "0.5"))
+    # YOLO 推理设备: "auto"（自动选 CUDA→CPU）| "cpu" | "cuda" | "0"
+    YOLO_DEVICE: str = os.getenv("YOLO_DEVICE", "auto")
 
     # 报警冷却（秒）
     ALERT_COOLDOWN: int = int(os.getenv("ALERT_COOLDOWN", "10"))

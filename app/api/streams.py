@@ -171,25 +171,26 @@ async def mjpeg_stream(stream_id: int):
         raise HTTPException(404, "Stream not found")
 
     async def _generator():
-        last_frame: Optional[bytes] = None
-        idle_ticks = 0
+        consecutive_idle = 0
         while True:
+            # 等待新帧事件，超时 1 秒用于检测流是否已停止
+            try:
+                await asyncio.wait_for(state.frame_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                consecutive_idle += 1
+                if state.status not in ("running", "starting") and consecutive_idle >= 10:
+                    break
+                continue
+
+            consecutive_idle = 0
             frame = state.latest_frame
-            if frame and frame is not last_frame:
-                last_frame = frame
-                idle_ticks = 0
+            if frame:
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n"
                     + frame
                     + b"\r\n"
                 )
-            else:
-                idle_ticks += 1
-                # 流停止超过 10 秒则结束推流
-                if state.status not in ("running", "starting") and idle_ticks > 200:
-                    break
-            await asyncio.sleep(0.05)  # 最高 20 fps
 
     return StreamingResponse(
         _generator(),
