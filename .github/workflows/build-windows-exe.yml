@@ -129,6 +129,7 @@ jobs:
           shutil.copy(str(out), str(dst))
           print(f'ONNX exported -> {dst} ({dst.stat().st_size // 1024} KB)')
           "
+          pip install --force-reinstall onnxruntime-gpu
 
       # ── PyInstaller 打包 ─────────────────────────────────────
       - name: Build EXE with PyInstaller
