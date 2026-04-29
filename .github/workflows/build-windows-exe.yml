@@ -136,7 +136,7 @@ jobs:
             --copy-metadata sqlalchemy `
             --copy-metadata aiosqlite `
             --copy-metadata ultralytics `
-            --copy-metadata onnxruntime `
+            --copy-metadata onnxruntime-gpu `
             --hidden-import fastapi `
             --hidden-import fastapi.responses `
             --hidden-import fastapi.staticfiles `
