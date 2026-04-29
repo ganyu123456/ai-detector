@@ -115,6 +115,21 @@ jobs:
           New-Item -ItemType Directory -Force -Path "app\web\static"   | Out-Null
           New-Item -ItemType Directory -Force -Path "app\web\templates" | Out-Null
 
+      - name: Pre-export YOLO to ONNX
+        shell: pwsh
+        run: |
+          pip install onnx onnxslim
+          New-Item -ItemType Directory -Force -Path "data\models" | Out-Null
+          python -c "
+          from ultralytics import YOLO
+          import shutil, pathlib
+          m = YOLO('yolo11n.pt')
+          out = m.export(format='onnx', dynamic=False, simplify=True)
+          dst = pathlib.Path('data/models/yolo11n.onnx')
+          shutil.copy(str(out), str(dst))
+          print(f'ONNX exported -> {dst} ({dst.stat().st_size // 1024} KB)')
+          "
+
       # ── PyInstaller 打包 ─────────────────────────────────────
       - name: Build EXE with PyInstaller
         run: |
@@ -124,6 +139,7 @@ jobs:
             --name "${{ env.APP_NAME }}" `
             --add-data "app/web/templates;web/templates" `
             --add-data "app/web/static;web/static" `
+            --add-data "data/models;data/models" `
             --collect-all av `
             --collect-all uvicorn `
             --collect-all jinja2 `

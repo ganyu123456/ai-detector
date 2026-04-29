@@ -38,15 +38,26 @@ def _resolve_device(requested: str) -> str:
 
 
 def _onnx_path_for(model_path: str) -> Optional[Path]:
-    """返回对应的 .onnx 路径（若存在）。"""
+    """返回对应的 .onnx 路径（若存在）。
+
+    查找顺序：
+    1. model_path 同级目录（如 data/models/yolo11n.onnx）
+    2. settings.MODELS_DIR
+    3. PyInstaller 打包目录 sys._MEIPASS/data/models/（EXE 运行时）
+    """
+    import sys
     p = Path(model_path)
     candidate = p.with_suffix(".onnx")
     if candidate.exists():
         return candidate
-    # 也在 MODELS_DIR 下找
     in_models = settings.MODELS_DIR / candidate.name
     if in_models.exists():
         return in_models
+    # EXE 内置模型目录
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bundled = Path(sys._MEIPASS) / "data" / "models" / candidate.name
+        if bundled.exists():
+            return bundled
     return None
 
 
@@ -158,8 +169,20 @@ class YoloDetector(AbstractDetector):
         """降级路径：用 ultralytics PyTorch 加载。"""
         from ultralytics import YOLO
         self._model = YOLO(model_path)
-        if self._device and self._device != "auto":
-            self._model.to(self._device)
+        if self._device and self._device not in ("auto", "cpu"):
+            # 仅当 PyTorch 实际能使用 CUDA 时才移到 GPU，避免 CPU-only 构建报错
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    self._model.to(self._device)
+                else:
+                    logger.warning(
+                        f"PyTorch CUDA not available (device={self._device}), falling back to CPU"
+                    )
+                    self._device = "cpu"
+            except ImportError:
+                logger.warning("torch not importable, keeping model on CPU")
+                self._device = "cpu"
         actual = next(self._model.model.parameters()).device
         logger.info(f"YOLO PyTorch loaded: {model_path}, device={actual}")
         self._use_onnx = False
