@@ -177,7 +177,13 @@
 {% block scripts %}
 <script>
 // ── 配置 ─────────────────────────────────────────────────
-const WEBRTC_BASE = "{{ mediamtx_webrtc_url }}";
+// 当页面通过 HTTPS 访问时，直接请求 http:// 的 MediaMTX 会被浏览器以 Mixed Content
+// 阻断（Safari 尤为严格）。此时改用 nginx 在同域名下的代理路径 /mediamtx/，
+// 信令全程走 HTTPS，彻底解决 Safari/Firefox 的混合内容限制。
+const _WEBRTC_BASE_ENV = "{{ mediamtx_webrtc_url }}";
+const WEBRTC_BASE = (location.protocol === 'https:' && _WEBRTC_BASE_ENV.startsWith('http:'))
+    ? location.origin + '/mediamtx'
+    : _WEBRTC_BASE_ENV;
 
 // stream_id -> {pc: RTCPeerConnection, retryTimer: number}
 const peerConns = {};
