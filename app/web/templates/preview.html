@@ -211,7 +211,25 @@ async function connectWhep(streamId, rtspUrl) {
   });
   peerConns[streamId] = { pc, retryTimer: null };
 
-  pc.addTransceiver('video', { direction: 'recvonly' });
+  const transceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+
+  // 优先声明 H.265/HEVC codec 偏好，让 SDP Offer 包含 HEVC
+  // Chrome 130+ / Edge on Windows with GPU 支持 H.265 WebRTC 硬解
+  try {
+    const caps = RTCRtpReceiver.getCapabilities('video');
+    if (caps) {
+      const hevcCodecs = caps.codecs.filter(c => /h265|hevc/i.test(c.mimeType));
+      const otherCodecs = caps.codecs.filter(c => !/h265|hevc/i.test(c.mimeType));
+      if (hevcCodecs.length > 0) {
+        transceiver.setCodecPreferences([...hevcCodecs, ...otherCodecs]);
+        console.log(`Stream ${streamId}: H.265 codec set as preference`);
+      } else {
+        console.warn(`Stream ${streamId}: H.265 not in browser WebRTC capabilities, will use H.264`);
+      }
+    }
+  } catch (e) {
+    console.warn(`Stream ${streamId}: setCodecPreferences not supported:`, e);
+  }
 
   pc.ontrack = (evt) => {
     if (evt.track.kind === 'video') {
