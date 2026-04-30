@@ -241,8 +241,32 @@ class YoloDetector(AbstractDetector):
             confs = preds[:, 4]
             boxes_xywh = preds[:, :4]
 
+        if len(class_ids) == 0:
+            return detections
+
         scale_x, scale_y = w / 640.0, h / 640.0
-        for i in range(len(class_ids)):
+
+        # 将坐标统一转为原图尺度下的 [x, y, w, h]（NMSBoxes 需要此格式）
+        nms_boxes = []
+        for bx in boxes_xywh:
+            if bx.shape[0] == 4 and not (bx[0] < 1 and bx[1] < 1):
+                cx, cy, bw, bh = float(bx[0]) * scale_x, float(bx[1]) * scale_y, \
+                                  float(bx[2]) * scale_x, float(bx[3]) * scale_y
+                nms_boxes.append([int(cx - bw / 2), int(cy - bh / 2), int(bw), int(bh)])
+            else:
+                x1_ = int(float(bx[0]) * scale_x)
+                y1_ = int(float(bx[1]) * scale_y)
+                nms_boxes.append([x1_, y1_,
+                                   int(float(bx[2]) * scale_x) - x1_,
+                                   int(float(bx[3]) * scale_y) - y1_])
+
+        # NMS：去除同类高重叠框，只保留置信度最高的
+        indices = cv2.dnn.NMSBoxes(nms_boxes, confs.tolist(), confidence_thr, iou_thr)
+        if len(indices) == 0:
+            return detections
+        indices = indices.flatten()
+
+        for i in indices:
             cls_id = int(class_ids[i])
             label = (self._class_names[cls_id]
                      if self._class_names and cls_id < len(self._class_names)
@@ -250,20 +274,11 @@ class YoloDetector(AbstractDetector):
             if filter_classes and label not in filter_classes:
                 continue
             conf = float(confs[i])
-            bx = boxes_xywh[i]
-            if bx.shape[0] == 4 and not (bx[0] < 1 and bx[1] < 1):
-                # xywh (center) format
-                cx, cy, bw, bh = bx * np.array([scale_x, scale_y, scale_x, scale_y])
-                x1 = int(cx - bw / 2)
-                y1 = int(cy - bh / 2)
-                x2 = int(cx + bw / 2)
-                y2 = int(cy + bh / 2)
-            else:
-                x1, y1, x2, y2 = int(bx[0] * scale_x), int(bx[1] * scale_y), int(bx[2] * scale_x), int(bx[3] * scale_y)
+            nx, ny, nw, nh = nms_boxes[i]
             detections.append(Detection(
                 label=label,
                 confidence=conf,
-                bbox=[x1, y1, x2, y2],
+                bbox=[nx, ny, nx + nw, ny + nh],
                 metadata={"cls_id": cls_id},
             ))
         return detections
