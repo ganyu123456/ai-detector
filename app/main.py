@@ -22,10 +22,59 @@ from starlette.requests import Request
 from app.config import settings
 from app.database import init_db
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+def _setup_logging() -> None:
+    """
+    配置日志系统（最佳实践）：
+    - 控制台：输出全部日志，级别由 LOG_LEVEL 控制
+    - 文件（app.log）：输出 WARNING 及以上，RotatingFileHandler 10MB/7份，方便排查问题
+    - 第三方库噪音抑制：uvicorn.access / multipart 调高到 WARNING
+    """
+    from logging.handlers import RotatingFileHandler
+    from pathlib import Path
+
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    level = getattr(logging, settings.LOG_LEVEL, logging.INFO)
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)   # root 全开，由各 handler 控制级别
+
+    # ── 控制台 handler ──────────────────────────────────────────────────────
+    console = logging.StreamHandler()
+    console.setLevel(level)
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    # ── 文件 handler（仅 WARNING+，避免高频 INFO 刷满磁盘）──────────────────
+    if settings.LOG_DIR:
+        log_dir = Path(settings.LOG_DIR)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_dir / "app.log",
+            maxBytes=10 * 1024 * 1024,   # 10 MB
+            backupCount=7,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(logging.WARNING)
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+
+        # 单独记录 ERROR 级别到独立文件，快速定位严重问题
+        error_handler = RotatingFileHandler(
+            log_dir / "error.log",
+            maxBytes=5 * 1024 * 1024,    # 5 MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        error_handler.setLevel(logging.ERROR)
+        error_handler.setFormatter(fmt)
+        root.addHandler(error_handler)
+
+    # ── 抑制第三方库高频噪音日志 ────────────────────────────────────────────
+    for noisy in ("uvicorn.access", "multipart.multipart", "PIL"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 

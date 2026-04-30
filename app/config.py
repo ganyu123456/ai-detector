@@ -79,6 +79,19 @@ class Settings:
     # 需 <= detect_interval，否则可能漏帧；降低此值可提高检测实时性，但会增加 CPU 占用
     FRAME_SAMPLE_INTERVAL: float = float(os.getenv("FRAME_SAMPLE_INTERVAL", "0.5"))
 
+    # 流断线后自动重连等待时间（秒）
+    STREAM_RETRY_DELAY: int = int(os.getenv("STREAM_RETRY_DELAY", "10"))
+
+    # 摄像头离线通知：最多发送次数（0=不通知）
+    OFFLINE_NOTIFY_MAX: int = int(os.getenv("OFFLINE_NOTIFY_MAX", "10"))
+    # 摄像头离线通知：两次通知之间的最短间隔（秒），默认 10 分钟
+    OFFLINE_NOTIFY_INTERVAL: int = int(os.getenv("OFFLINE_NOTIFY_INTERVAL", "600"))
+
+    # 日志级别：DEBUG | INFO | WARNING | ERROR
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+    # 日志文件目录（留空则不写文件）；轮转：单文件 10MB，保留 7 份
+    LOG_DIR: str = os.getenv("LOG_DIR", str(DATA_DIR / "logs"))
+
     # MediaMTX WebRTC 基础 URL，浏览器通过此地址拉取 WHEP 流
     MEDIAMTX_WEBRTC_URL: str = os.getenv("MEDIAMTX_WEBRTC_URL", "http://192.168.2.23:8889")
 

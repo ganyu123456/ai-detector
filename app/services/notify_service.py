@@ -13,6 +13,7 @@ import hashlib
 import logging
 import smtplib
 import ssl
+from datetime import datetime
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -44,6 +45,22 @@ class NotifyService:
         for ch, res in zip(channels, results):
             if isinstance(res, Exception):
                 logger.error(f"Channel [{ch['name']}] send failed: {res}")
+
+    async def send_system_event(
+        self,
+        event_type: str,
+        title: str,
+        detail: str,
+    ) -> None:
+        """发送系统事件通知（摄像头离线/恢复等），复用现有渠道，无截图。"""
+        alert = {
+            "stream_name": title,
+            "type": event_type,
+            "label": detail,
+            "confidence": 1.0,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        await self.send_alert(alert, snapshot_bytes=None)
 
     async def send_test(self, channel_id: int) -> tuple[bool, str]:
         """向指定渠道发送测试消息，返回 (ok, message)。"""

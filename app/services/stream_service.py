@@ -11,6 +11,8 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -135,18 +137,16 @@ class StreamManager:
             for attempt, force_sw in enumerate([False, True]):
                 if attempt == 1:
                     logger.info(f"Stream {state.stream_id}: falling back to software decode")
+                hw_ctx = None
+                container = None
                 try:
                     container = av.open(state.rtsp_url, options=rtsp_opts)
                     vstream = container.streams.video[0]
 
-                    hw_ctx = None
                     if use_hw and not force_sw:
                         hw_ctx = _try_create_hw_context(decoder_name, vstream)
 
                     _decode_loop(container, vstream, hw_ctx, cv2)
-                    container.close()
-                    if hw_ctx is not None:
-                        hw_ctx.close()
                     break
                 except Exception as e:
                     if attempt == 0 and use_hw:
@@ -154,8 +154,17 @@ class StreamManager:
                             f"Stream {state.stream_id} hw decode error: {e}, retrying SW"
                         )
                         continue
-                    asyncio.run_coroutine_threadsafe(_set_error(str(e)), loop)
-                    break
+                    # 通知外层重连循环，抛出异常而非调用 _set_error
+                    raise
+                finally:
+                    # 安全关闭资源（CodecContext 不一定有 close 方法）
+                    if hw_ctx is not None:
+                        _safe_close(hw_ctx)
+                    if container is not None:
+                        try:
+                            container.close()
+                        except Exception:
+                            pass
 
         def _decode_loop(container, vstream, hw_ctx, cv2):
             """解码循环：优先使用独立 hw_ctx 解码，否则用容器默认解码。
@@ -196,24 +205,98 @@ class StreamManager:
                 except Exception as e:
                     logger.warning(f"Stream {state.stream_id} frame callback error: {e}")
 
-        async def _set_error(msg: str) -> None:
-            state.status = "error"
-            state.error_msg = msg
-            logger.error(f"Stream {state.stream_id} error: {msg}")
+        # ── 自动重连循环 ────────────────────────────────────────────────────
+        from app.services.notify_service import notify_service
 
-        try:
-            state.status = "running"
-            logger.info(f"Stream {state.stream_id} ({state.rtsp_url}) started")
-            await loop.run_in_executor(None, _pull_and_decode)
-        except asyncio.CancelledError:
-            logger.info(f"Stream {state.stream_id} cancelled")
-        except Exception as e:
-            state.status = "error"
-            state.error_msg = str(e)
-            logger.error(f"Stream {state.stream_id} error: {e}")
-        finally:
-            if state.status not in ("stopped",):
+        retry_delay      = settings.STREAM_RETRY_DELAY
+        notify_max       = settings.OFFLINE_NOTIFY_MAX
+        notify_interval  = settings.OFFLINE_NOTIFY_INTERVAL
+        attempt_count    = 0
+        notify_count     = 0          # 已发离线通知次数
+        last_notify_ts   = 0.0        # 上次离线通知的时间戳
+
+        while True:
+            try:
+                state.status = "running"
+                state.error_msg = ""
+                if attempt_count == 0:
+                    logger.info(f"Stream {state.stream_id} ({state.rtsp_url}) started")
+                else:
+                    logger.info(
+                        f"Stream {state.stream_id} reconnecting (attempt #{attempt_count})"
+                    )
+                await loop.run_in_executor(None, _pull_and_decode)
+                # _pull_and_decode 正常返回（流主动停止），退出循环
+                logger.info(f"Stream {state.stream_id} decode loop exited normally")
+
+                # 流恢复正常：若之前曾离线并发过通知，发一次"恢复"通知
+                if notify_count > 0:
+                    try:
+                        await notify_service.send_system_event(
+                            event_type="stream_online",
+                            title=f"📷 摄像头已恢复：{state.name}",
+                            detail=(
+                                f"流地址：{state.rtsp_url}\n"
+                                f"共重连 {attempt_count} 次后恢复正常"
+                            ),
+                        )
+                        logger.info(f"Stream {state.stream_id} recovery notification sent")
+                    except Exception as ne:
+                        logger.warning(f"Stream {state.stream_id} recovery notify failed: {ne}")
+                break
+
+            except asyncio.CancelledError:
+                logger.info(f"Stream {state.stream_id} cancelled")
+                break
+
+            except Exception as e:
+                attempt_count += 1
                 state.status = "error"
+                state.error_msg = str(e)
+                logger.error(
+                    f"Stream {state.stream_id} error: {e} — "
+                    f"retrying in {retry_delay}s (attempt #{attempt_count})"
+                )
+
+                # 离线通知：最多 notify_max 次，每次间隔 notify_interval 秒
+                now_ts = time.monotonic()
+                if (
+                    notify_max > 0
+                    and notify_count < notify_max
+                    and (now_ts - last_notify_ts) >= notify_interval
+                ):
+                    try:
+                        remaining = notify_max - notify_count - 1
+                        await notify_service.send_system_event(
+                            event_type="stream_offline",
+                            title=f"📵 摄像头离线：{state.name}",
+                            detail=(
+                                f"流地址：{state.rtsp_url}\n"
+                                f"错误原因：{e}\n"
+                                f"第 {notify_count + 1} 次通知"
+                                + (f"，还将最多再通知 {remaining} 次" if remaining > 0 else "，本次为最后一次通知")
+                            ),
+                        )
+                        notify_count += 1
+                        last_notify_ts = now_ts
+                        logger.info(
+                            f"Stream {state.stream_id} offline notification sent "
+                            f"({notify_count}/{notify_max})"
+                        )
+                    except Exception as ne:
+                        logger.warning(f"Stream {state.stream_id} offline notify failed: {ne}")
+
+                try:
+                    await asyncio.sleep(retry_delay)
+                except asyncio.CancelledError:
+                    logger.info(f"Stream {state.stream_id} cancelled during retry wait")
+                    break
+                # 检查是否在等待期间被手动停止
+                if state.status == "stopped":
+                    break
+
+        if state.status not in ("stopped",):
+            state.status = "error"
 
 
 def _try_create_hw_context(decoder_name: str, vstream):
@@ -269,6 +352,16 @@ def _pick_video_decoder() -> tuple[str, bool]:
         logger.debug(f"Codec probe failed: {e}")
 
     return "hevc", False
+
+
+def _safe_close(obj) -> None:
+    """安全关闭 PyAV 对象：部分版本的 CodecContext 没有 close() 方法，兼容处理。"""
+    close_fn = getattr(obj, "close", None)
+    if callable(close_fn):
+        try:
+            close_fn()
+        except Exception as e:
+            logger.debug(f"_safe_close ignored: {e}")
 
 
 stream_manager = StreamManager()

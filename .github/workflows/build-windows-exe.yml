@@ -212,13 +212,78 @@ jobs:
         shell: pwsh
         run: |
           $pkg = "dist\${{ env.APP_NAME }}-windows"
-          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
-          New-Item -ItemType Directory -Force -Path "$pkg\data" | Out-Null
+          New-Item -ItemType Directory -Force -Path $pkg           | Out-Null
+          New-Item -ItemType Directory -Force -Path "$pkg\data"    | Out-Null
           New-Item -ItemType Directory -Force -Path "$pkg\data\pictures" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$pkg\data\logs"     | Out-Null
 
           Copy-Item "dist\${{ env.APP_NAME }}.exe" "$pkg\"
-          Copy-Item "docker-compose.yaml"     "$pkg\" -ErrorAction SilentlyContinue
+          Copy-Item "docker-compose.yaml" "$pkg\" -ErrorAction SilentlyContinue
 
+          # ── 生成标准 .env 配置文件（含所有可用选项及中文注释）──────────────
+          $dotenv = @"
+          # =============================================================
+          # AI Detector ${{ steps.version.outputs.ver }} — 配置文件
+          # 修改此文件后重启 ai-detector.exe 生效
+          # 等号两侧不要有空格，值不需要引号
+          # =============================================================
+
+          # ── 服务监听 ─────────────────────────────────────────────────
+          HOST=0.0.0.0
+          PORT=8090
+
+          # ── 认证 ─────────────────────────────────────────────────────
+          ADMIN_USERNAME=admin
+          ADMIN_PASSWORD=luculent1!
+          SESSION_SECRET=ai-detector-secret-change-me
+
+          # ── miloco-camera 网关（用于一键同步流源）───────────────────
+          GATEWAY_URL=http://192.168.2.23:8080
+
+          # ── MediaMTX WebRTC 地址（浏览器 WebRTC 拉流用）─────────────
+          # 浏览器预览页面通过此地址播放摄像头画面，填写 MediaMTX 所在机器 IP
+          MEDIAMTX_WEBRTC_URL=http://192.168.2.23:8889
+
+          # ── YOLO 检测 ─────────────────────────────────────────────────
+          # 推理设备: auto（自动 CUDA→CPU）| cpu | cuda
+          YOLO_DEVICE=auto
+          # 模型文件名（放在 data\models\ 目录下）
+          YOLO_MODEL=yolo11n.pt
+          # 全局置信度阈值（0.0~1.0，各检测器可单独覆盖）
+          YOLO_CONFIDENCE=0.5
+
+          # ── 性能调优 ─────────────────────────────────────────────────
+          # 检测帧队列大小：GPU 模式下可调高为 4~8，CPU 模式保持 2
+          FRAME_QUEUE_SIZE=2
+          # GPU→CPU 帧采样间隔（秒）：需 <= 各检测器 detect_interval
+          # 值越小实时性越高，CPU 占用略增；默认 0.5s（2fps 采样）
+          FRAME_SAMPLE_INTERVAL=0.5
+          # 同类报警冷却时间（秒），避免短时间重复报警
+          ALERT_COOLDOWN=10
+
+          # ── 断线重连 ─────────────────────────────────────────────────
+          # 摄像头断线后每次重连等待时间（秒）
+          STREAM_RETRY_DELAY=10
+
+          # ── 摄像头离线通知 ────────────────────────────────────────────
+          # 最多发送离线通知次数（0 = 不通知）
+          OFFLINE_NOTIFY_MAX=10
+          # 两次离线通知之间的最短间隔（秒），默认 10 分钟
+          OFFLINE_NOTIFY_INTERVAL=600
+
+          # ── 日志 ─────────────────────────────────────────────────────
+          # 日志级别: DEBUG | INFO | WARNING | ERROR
+          LOG_LEVEL=INFO
+          # 日志文件目录（留空则不写文件），app.log 10MB 轮转 7 份，error.log 5MB 轮转 5 份
+          LOG_DIR=data\logs
+
+          # ── 数据目录（一般不需要修改）────────────────────────────────
+          # DATA_DIR=data
+          "@ -replace '^          ', ''
+
+          Set-Content -Path "$pkg\.env" -Value $dotenv -Encoding UTF8
+
+          # ── 生成 README ─────────────────────────────────────────────
           $ver = "${{ steps.version.outputs.ver }}"
           $readme = @"
           # AI Detector $ver — Windows 版
@@ -226,10 +291,20 @@ jobs:
           ## 快速开始
 
           1. 确保本机或局域网内已运行 miloco-camera 流媒体网关（或其他 RTSP 源）
-          2. 双击运行 ``${{ env.APP_NAME }}.exe``
-          3. 控制台出现 "AI Detector started" 后，打开浏览器访问 http://localhost:8090
-          4. 进入 **流源配置** → 填写 RTSP 地址（或点击"从网关同步"）
-          5. 进入 **算法配置** → 为每路流添加检测器并启用
+          2. 编辑同目录的 ``.env`` 文件，填写你的实际 IP 地址和配置
+          3. 双击运行 ``${{ env.APP_NAME }}.exe``
+          4. 控制台出现 "AI Detector started" 后，打开浏览器访问 http://localhost:8090
+          5. 进入 **流源配置** → 填写 RTSP 地址（或点击"从网关同步"）
+          6. 进入 **算法配置** → 为每路流添加检测器并启用
+
+          ## 配置文件 .env
+
+          所有配置项已预置在同目录的 ``.env`` 文件中，修改后重启 EXE 即可生效。
+          重点配置项：
+
+            GATEWAY_URL            — miloco-camera 网关地址（用于一键同步摄像头列表）
+            MEDIAMTX_WEBRTC_URL    — MediaMTX 地址（浏览器 WebRTC 画面预览用）
+            ADMIN_USERNAME/PASSWORD — 登录账号密码
 
           ## GPU 加速（自动）
 
@@ -244,25 +319,12 @@ jobs:
 
           ```
           ai-detector-windows\
-          ├── ai-detector.exe          ← 主程序（双击运行）
-          ├── docker-compose.yaml      ← Docker 部署参考配置
+          ├── ai-detector.exe     ← 主程序（双击运行）
+          ├── .env                ← 配置文件（修改此文件调整设置）
+          ├── docker-compose.yaml ← Docker 部署参考
           └── data\
-              └── pictures\            ← 报警截图自动保存于此
-          ```
-
-          ## 配置说明（环境变量）
-
-          在程序同目录新建 ``.env`` 文件可覆盖默认配置：
-
-          ```
-          GATEWAY_URL=http://192.168.2.23:8080  # miloco-camera 网关地址
-          MEDIAMTX_WEBRTC_URL=http://192.168.2.23:8889  # MediaMTX WebRTC 地址（浏览器拉流用）
-          HOST=0.0.0.0
-          PORT=8090
-          YOLO_MODEL=yolo11n.pt               # 可替换为更大模型以提升精度
-          YOLO_DEVICE=auto                    # auto | cpu | cuda（默认 auto）
-          FRAME_QUEUE_SIZE=5                  # GPU 推理时可调高为 5（默认 2）
-          ALERT_COOLDOWN=30                   # 同类报警冷却秒数
+              ├── pictures\       ← 报警截图自动保存于此
+              └── logs\           ← 运行日志（app.log / error.log）
           ```
           "@ -replace '^          ', ''
 
