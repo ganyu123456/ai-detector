@@ -158,7 +158,7 @@ class DetectionWorker:
                             {
                                 "label": d.label,
                                 "confidence": round(float(d.confidence), 3),
-                                "bbox": [int(d.x1), int(d.y1), int(d.x2), int(d.y2)],
+                                "bbox": [int(v) for v in d.bbox],  # d.bbox = [x1, y1, x2, y2]
                             }
                             for d in detections
                         ],
