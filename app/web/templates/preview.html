@@ -20,11 +20,18 @@
   .stream-card-header .name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
   .stream-card-body { position: relative; background: #000; aspect-ratio: 16/9; }
 
-  .video-wrap { width: 100%; height: 100%; }
-  .video-wrap img {
-    width: 100%; height: 100%; object-fit: contain;
-    display: block;
+  /* 视频+画布叠加 */
+  .video-wrap {
+    position: relative; width: 100%; height: 100%;
   }
+  .video-wrap video {
+    width: 100%; height: 100%; object-fit: contain; display: block; background: #000;
+  }
+  .video-wrap canvas {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none;
+  }
+
   .placeholder {
     width: 100%; height: 100%; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 8px;
@@ -38,6 +45,7 @@
     border-top: 1px solid var(--border);
   }
   .fps-badge { font-size: 11px; color: var(--green); }
+  .webrtc-badge { font-size: 10px; color: #58a6ff; margin-left: 4px; }
 
   /* 全屏遮罩 */
   #fullscreen-overlay {
@@ -73,10 +81,13 @@
       <i class="bi bi-layout-sidebar-inset-reverse"></i>
     </button>
   </div>
-  <button class="btn btn-sm btn-outline-secondary ms-1" onclick="refreshAll()">
-    <i class="bi bi-arrow-clockwise"></i> 刷新全部
+  <button class="btn btn-sm btn-outline-secondary ms-1" onclick="reconnectAll()">
+    <i class="bi bi-arrow-clockwise"></i> 重连全部
   </button>
   <span class="text-muted ms-2" style="font-size:12px">共 {{ streams|length }} 路流</span>
+  <span class="badge bg-primary ms-auto" style="font-size:11px">
+    <i class="bi bi-broadcast"></i> WebRTC 模式
+  </span>
 </div>
 
 {% if streams %}
@@ -87,6 +98,7 @@
       <div class="name">
         <span class="dot dot-{{ s.status }}"></span>
         {{ s.name }}
+        <span class="webrtc-badge">WebRTC</span>
       </div>
       <div class="d-flex align-items-center gap-2">
         <span class="fps-badge" id="fps-{{ s.id }}">{{ s.fps }} fps</span>
@@ -110,12 +122,9 @@
 
     <div class="stream-card-body">
       {% if s.status == 'running' or s.status == 'starting' %}
-      <div class="video-wrap">
-        <img id="mjpeg-{{ s.id }}"
-             src="/api/streams/{{ s.id }}/mjpeg"
-             alt="{{ s.name }}"
-             onerror="onImgError({{ s.id }})"
-             loading="lazy">
+      <div class="video-wrap" id="wrap-{{ s.id }}">
+        <video id="video-{{ s.id }}" autoplay muted playsinline></video>
+        <canvas id="canvas-{{ s.id }}"></canvas>
       </div>
       {% else %}
       <div class="placeholder" id="placeholder-{{ s.id }}">
@@ -123,7 +132,7 @@
         <span>流未运行（{{ s.status }}）</span>
         {% if s.status == 'stopped' %}
         <button class="btn btn-sm btn-outline-success mt-1"
-                onclick="startAndPlay({{ s.id }})">
+                onclick="startAndPlay({{ s.id }}, '{{ s.rtsp_url }}')">
           <i class="bi bi-play"></i> 启动流
         </button>
         {% endif %}
@@ -158,6 +167,225 @@
 
 {% block scripts %}
 <script>
+// ── 配置 ─────────────────────────────────────────────────
+const WEBRTC_BASE = "{{ mediamtx_webrtc_url }}";
+
+// stream_id -> {pc: RTCPeerConnection, retryTimer: number}
+const peerConns = {};
+// stream_id -> [{label, confidence, bbox:[x1,y1,x2,y2], expireAt}]
+const detectionBoxes = {};
+const BOX_TTL_MS = 3000;   // 检测框显示时长（毫秒）
+
+// 从 RTSP URL 提取 MediaMTX 路径段
+// rtsp://host:port/path → path
+function rtspPathToWhep(rtspUrl) {
+  try {
+    const url = new URL(rtspUrl);
+    // pathname 形如 /camera_1，去掉开头斜杠
+    return url.pathname.replace(/^\//, '').replace(/\/$/, '');
+  } catch (_) {
+    return null;
+  }
+}
+
+// ── WebRTC WHEP 连接 ──────────────────────────────────────
+async function connectWhep(streamId, rtspUrl) {
+  const path = rtspPathToWhep(rtspUrl);
+  if (!path) {
+    console.warn(`Stream ${streamId}: cannot parse rtsp path from ${rtspUrl}`);
+    return;
+  }
+  const whepUrl = `${WEBRTC_BASE}/${path}/whep`;
+  const video = document.getElementById(`video-${streamId}`);
+  if (!video) return;
+
+  // 如有旧连接先关闭
+  if (peerConns[streamId]?.pc) {
+    peerConns[streamId].pc.close();
+  }
+  clearTimeout(peerConns[streamId]?.retryTimer);
+
+  const pc = new RTCPeerConnection({
+    iceServers: [],           // 同局域网无需 STUN/TURN
+    bundlePolicy: 'max-bundle',
+  });
+  peerConns[streamId] = { pc, retryTimer: null };
+
+  pc.addTransceiver('video', { direction: 'recvonly' });
+
+  pc.ontrack = (evt) => {
+    if (evt.track.kind === 'video') {
+      video.srcObject = new MediaStream([evt.track]);
+      console.log(`Stream ${streamId}: WebRTC track received`);
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    const state = pc.iceConnectionState;
+    console.log(`Stream ${streamId} ICE: ${state}`);
+    if (state === 'failed' || state === 'disconnected') {
+      scheduleRetry(streamId, rtspUrl);
+    }
+  };
+
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // 等待 ICE 候选收集完成（或超时 2 秒）
+    await new Promise((resolve) => {
+      if (pc.iceGatheringState === 'complete') { resolve(); return; }
+      const onGather = () => {
+        if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', onGather); resolve(); }
+      };
+      pc.addEventListener('icegatheringstatechange', onGather);
+      setTimeout(resolve, 2000);
+    });
+
+    const resp = await fetch(whepUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: pc.localDescription.sdp,
+    });
+
+    if (!resp.ok) {
+      throw new Error(`WHEP ${resp.status}: ${await resp.text()}`);
+    }
+
+    const answerSdp = await resp.text();
+    await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+    console.log(`Stream ${streamId}: WHEP negotiation complete → ${whepUrl}`);
+  } catch (e) {
+    console.warn(`Stream ${streamId} WHEP error: ${e.message}`);
+    showPlaceholder(streamId, `WebRTC 连接失败: ${e.message}`);
+    scheduleRetry(streamId, rtspUrl);
+  }
+}
+
+function scheduleRetry(streamId, rtspUrl, delayMs = 5000) {
+  const entry = peerConns[streamId];
+  if (entry) {
+    clearTimeout(entry.retryTimer);
+    entry.retryTimer = setTimeout(() => connectWhep(streamId, rtspUrl), delayMs);
+  }
+}
+
+function showPlaceholder(streamId, msg) {
+  const wrap = document.getElementById(`wrap-${streamId}`);
+  if (!wrap) return;
+  const body = wrap.closest('.stream-card-body');
+  if (!body) return;
+  let ph = body.querySelector('.placeholder-dynamic');
+  if (!ph) {
+    ph = document.createElement('div');
+    ph.className = 'placeholder placeholder-dynamic';
+    body.appendChild(ph);
+  }
+  ph.innerHTML = `<i class="bi bi-hourglass-split"></i><span>${msg}</span>`;
+}
+
+// ── 检测框 Canvas 渲染 ────────────────────────────────────
+const COLORS = ['#ff4444','#44ff44','#4488ff','#ffaa00','#ff44ff','#44ffff'];
+
+function renderDetections(streamId) {
+  const canvas = document.getElementById(`canvas-${streamId}`);
+  const video  = document.getElementById(`video-${streamId}`);
+  if (!canvas || !video) return;
+
+  const vw = video.videoWidth  || video.clientWidth;
+  const vh = video.videoHeight || video.clientHeight;
+  canvas.width  = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const boxes = detectionBoxes[streamId] || [];
+  const now = Date.now();
+  const alive = boxes.filter(b => b.expireAt > now);
+  detectionBoxes[streamId] = alive;
+
+  if (!alive.length || !vw || !vh) return;
+
+  // 视频在 canvas 内 object-fit:contain 的实际渲染区域
+  const canvasAspect = canvas.width / canvas.height;
+  const videoAspect  = vw / vh;
+  let renderW, renderH, offsetX = 0, offsetY = 0;
+  if (videoAspect > canvasAspect) {
+    renderW = canvas.width;
+    renderH = canvas.width / videoAspect;
+    offsetY = (canvas.height - renderH) / 2;
+  } else {
+    renderH = canvas.height;
+    renderW = canvas.height * videoAspect;
+    offsetX = (canvas.width - renderW) / 2;
+  }
+  const scaleX = renderW / vw;
+  const scaleY = renderH / vh;
+
+  ctx.font = 'bold 13px sans-serif';
+  ctx.lineWidth = 2;
+
+  alive.forEach((det, idx) => {
+    const color = COLORS[idx % COLORS.length];
+    const [x1, y1, x2, y2] = det.bbox;
+    const rx = offsetX + x1 * scaleX;
+    const ry = offsetY + y1 * scaleY;
+    const rw = (x2 - x1) * scaleX;
+    const rh = (y2 - y1) * scaleY;
+
+    ctx.strokeStyle = color;
+    ctx.strokeRect(rx, ry, rw, rh);
+
+    const label = `${det.label} ${(det.confidence * 100).toFixed(0)}%`;
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = color;
+    ctx.fillRect(rx - 1, ry - 18, tw + 8, 18);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(label, rx + 3, ry - 4);
+  });
+}
+
+// 每帧重绘（requestAnimationFrame 循环）
+function animLoop() {
+  Object.keys(detectionBoxes).forEach(sid => renderDetections(Number(sid)));
+  requestAnimationFrame(animLoop);
+}
+requestAnimationFrame(animLoop);
+
+// ── WebSocket 检测结果接收 ────────────────────────────────
+let ws = null;
+let wsRetryTimer = null;
+
+function connectWs() {
+  clearTimeout(wsRetryTimer);
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/events`);
+
+  ws.onopen = () => console.log('WebSocket /ws/events connected');
+
+  ws.onmessage = (evt) => {
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch (_) { return; }
+    if (msg.type !== 'detection') return;
+
+    const sid = msg.stream_id;
+    if (!detectionBoxes[sid]) detectionBoxes[sid] = [];
+
+    // 用当前批次替换旧的，并设置过期时间
+    const expireAt = Date.now() + BOX_TTL_MS;
+    detectionBoxes[sid] = (msg.detections || []).map(d => ({ ...d, expireAt }));
+  };
+
+  ws.onclose = () => {
+    console.warn('WebSocket closed, retrying in 3s…');
+    wsRetryTimer = setTimeout(connectWs, 3000);
+  };
+  ws.onerror = (e) => {
+    console.error('WebSocket error', e);
+    ws.close();
+  };
+}
+
 // ── 布局控制 ─────────────────────────────────────────────
 const colMap = {1:'repeat(1,1fr)', 2:'repeat(auto-fill,minmax(460px,1fr))', 3:'repeat(auto-fill,minmax(320px,1fr))'};
 function setLayout(n){
@@ -166,44 +394,19 @@ function setLayout(n){
   event.currentTarget.classList.add('active');
 }
 
-// ── 刷新全部（重新挂载 <img> src 以重连 MJPEG 流）────────
-function refreshAll(){
-  document.querySelectorAll('[id^="mjpeg-"]').forEach(img=>{
-    const src = img.src;
-    img.src = '';
-    setTimeout(()=>img.src=src+'?t='+Date.now(), 100);
-  });
-  showToast('已刷新全部预览流');
+// ── 重连全部 WebRTC ───────────────────────────────────────
+function reconnectAll(){
+  STREAM_DATA.forEach(s => connectWhep(s.id, s.rtsp_url));
+  showToast('正在重连所有 WebRTC 流…');
 }
 
-// ── 图片加载失败（流未就绪）─────────────────────────────
-function onImgError(id){
-  const img = document.getElementById('mjpeg-'+id);
-  if(!img) return;
-  img.style.display='none';
-  const body = img.closest('.stream-card-body');
-  if(!body.querySelector('.placeholder')){
-    const ph=document.createElement('div');
-    ph.className='placeholder';
-    ph.innerHTML='<i class="bi bi-hourglass-split"></i><span>等待视频流…</span>';
-    body.appendChild(ph);
-  }
-  // 5 秒后自动重试
-  setTimeout(()=>{
-    img.style.display='';
-    img.src='/api/streams/'+id+'/mjpeg?t='+Date.now();
-    const ph=body.querySelector('.placeholder');
-    if(ph && !ph.querySelector('button')) ph.remove();
-  }, 5000);
-}
-
-// ── 启动流并开始播放 ─────────────────────────────────────
-async function startAndPlay(id){
+// ── 启动流并重新播放 ──────────────────────────────────────
+async function startAndPlay(id, rtspUrl){
   try{
-    await api('POST',`/api/streams/${id}/start`);
+    await api('POST', `/api/streams/${id}/start`);
     showToast('流已启动，等待视频…');
-    setTimeout(()=>location.reload(), 2000);
-  }catch(e){showToast('启动失败: '+e.message,'err');}
+    setTimeout(() => connectWhep(id, rtspUrl), 2000);
+  } catch(e) { showToast('启动失败: '+e.message,'err'); }
 }
 
 // ── 截图下载 ─────────────────────────────────────────────
@@ -212,39 +415,63 @@ async function takeSnapshot(id, name){
     const r = await fetch(`/api/streams/${id}/snapshot`);
     if(!r.ok){ showToast('截图失败，流可能未运行','warn'); return; }
     const blob = await r.blob();
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);
-    a.download=`snapshot_${name}_${Date.now()}.jpg`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `snapshot_${name}_${Date.now()}.jpg`;
     a.click();
     showToast('截图已下载');
-  }catch(e){showToast(e.message,'err');}
+  } catch(e) { showToast(e.message,'err'); }
 }
 
-// ── 全屏预览 ─────────────────────────────────────────────
+// ── 全屏预览（直接播放 WebRTC 视频） ────────────────────
 function openFullscreen(id, name){
-  const overlay=document.getElementById('fullscreen-overlay');
-  const img=document.getElementById('fullscreen-img');
-  img.src=`/api/streams/${id}/mjpeg?t=${Date.now()}`;
-  document.getElementById('fullscreen-label').textContent=name;
+  const overlay = document.getElementById('fullscreen-overlay');
+  // 临时将快照图片放入全屏（点击截图 API）
+  fetch(`/api/streams/${id}/snapshot`)
+    .then(r => r.ok ? r.blob() : null)
+    .then(blob => {
+      if(blob){
+        const img = document.getElementById('fullscreen-img');
+        img.src = URL.createObjectURL(blob);
+      }
+    });
+  document.getElementById('fullscreen-label').textContent = name;
   overlay.classList.add('show');
 }
 function closeFullscreen(){
-  const overlay=document.getElementById('fullscreen-overlay');
+  const overlay = document.getElementById('fullscreen-overlay');
   overlay.classList.remove('show');
-  document.getElementById('fullscreen-img').src='';
+  document.getElementById('fullscreen-img').src = '';
 }
-document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeFullscreen(); });
+document.addEventListener('keydown', e => { if(e.key==='Escape') closeFullscreen(); });
 
 // ── FPS 定期刷新 ─────────────────────────────────────────
 async function refreshFps(){
   try{
-    const data = await api('GET','/api/streams');
-    data.streams.forEach(s=>{
-      const el=document.getElementById('fps-'+s.id);
-      if(el) el.textContent=s.fps+' fps';
+    const data = await api('GET', '/api/streams');
+    data.streams.forEach(s => {
+      const el = document.getElementById('fps-'+s.id);
+      if(el) el.textContent = s.fps+' fps';
     });
-  }catch(_){}
+  } catch(_) {}
 }
 setInterval(refreshFps, 5000);
+
+// ── 初始化 ───────────────────────────────────────────────
+const STREAM_DATA = [
+  {% for s in streams %}
+  { id: {{ s.id }}, rtsp_url: {{ s.rtsp_url | tojson }}, status: {{ s.status | tojson }} },
+  {% endfor %}
+];
+
+// 启动 WebSocket
+connectWs();
+
+// 连接所有运行中的流
+STREAM_DATA.forEach(s => {
+  if (s.status === 'running' || s.status === 'starting') {
+    connectWhep(s.id, s.rtsp_url);
+  }
+});
 </script>
 {% endblock %}

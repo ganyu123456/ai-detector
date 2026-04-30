@@ -75,6 +75,9 @@ class Settings:
     # 帧队列大小
     FRAME_QUEUE_SIZE: int = int(os.getenv("FRAME_QUEUE_SIZE", "2"))
 
+    # MediaMTX WebRTC 基础 URL，浏览器通过此地址拉取 WHEP 流
+    MEDIAMTX_WEBRTC_URL: str = os.getenv("MEDIAMTX_WEBRTC_URL", "http://192.168.2.23:8889")
+
     # 认证
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "luculent1!")

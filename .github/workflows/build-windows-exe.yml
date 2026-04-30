@@ -166,6 +166,12 @@ jobs:
             --hidden-import uvicorn.protocols.http `
             --hidden-import uvicorn.protocols.http.h11_impl `
             --hidden-import uvicorn.protocols.websockets `
+            --hidden-import uvicorn.protocols.websockets.websockets_impl `
+            --hidden-import uvicorn.protocols.websockets.wsproto_impl `
+            --hidden-import websockets `
+            --hidden-import websockets.legacy `
+            --hidden-import websockets.legacy.server `
+            --hidden-import wsproto `
             --hidden-import uvicorn.lifespan `
             --hidden-import uvicorn.lifespan.on `
             --hidden-import sqlalchemy `
@@ -249,7 +255,8 @@ jobs:
           在程序同目录新建 ``.env`` 文件可覆盖默认配置：
 
           ```
-          GATEWAY_URL=http://localhost:8080    # miloco-camera 网关地址
+          GATEWAY_URL=http://192.168.2.23:8080  # miloco-camera 网关地址
+          MEDIAMTX_WEBRTC_URL=http://192.168.2.23:8889  # MediaMTX WebRTC 地址（浏览器拉流用）
           HOST=0.0.0.0
           PORT=8090
           YOLO_MODEL=yolo11n.pt               # 可替换为更大模型以提升精度
@@ -318,6 +325,7 @@ jobs:
             控制台日志中 `ONNXRuntime providers: ['CUDAExecutionProvider', ...]` 表示 GPU 已生效。
             
             可在 EXE 同目录 `.env` 中设置 `YOLO_DEVICE=cpu` 强制使用 CPU，或 `FRAME_QUEUE_SIZE=5` 在 GPU 模式下减少漏检。
+            **视频显示**：在 `.env` 中设置 `MEDIAMTX_WEBRTC_URL=http://<miloco-ip>:8889` 后，浏览器通过 WebRTC 从 MediaMTX 直接拉流，画面延迟 <1s，GPU 硬解，支持 4K。
 
             > EXE 大小：${{ steps.exeinfo.outputs.size_mb }} MB | 平台：Windows x64
           files: |

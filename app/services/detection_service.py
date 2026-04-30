@@ -1,11 +1,12 @@
 """
 检测算法调度服务
-订阅 RTSP 流帧，按配置运行各检测器，触发报警
+订阅 RTSP 流帧（numpy BGR），按配置运行各检测器，触发报警并通过 WebSocket 广播检测框。
 """
 import asyncio
+import json
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 
@@ -14,8 +15,48 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# WebSocket 广播管理器（全局单例）
+# ---------------------------------------------------------------------------
+
+class WebSocketManager:
+    """管理所有已连接的 WebSocket 客户端，广播 JSON 消息"""
+
+    def __init__(self):
+        self._clients: Set[asyncio.Queue] = set()
+
+    def add_client(self) -> asyncio.Queue:
+        """注册新客户端，返回其专属消息队列"""
+        q: asyncio.Queue = asyncio.Queue(maxsize=64)
+        self._clients.add(q)
+        logger.debug(f"WS client connected, total={len(self._clients)}")
+        return q
+
+    def remove_client(self, q: asyncio.Queue) -> None:
+        self._clients.discard(q)
+        logger.debug(f"WS client disconnected, total={len(self._clients)}")
+
+    async def broadcast(self, message: dict) -> None:
+        """向所有连接的客户端广播消息（丢帧不阻塞）"""
+        if not self._clients:
+            return
+        payload = json.dumps(message, ensure_ascii=False)
+        for q in list(self._clients):
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass  # 客户端跟不上时静默丢弃，不影响检测流程
+
+
+ws_manager = WebSocketManager()
+
+
+# ---------------------------------------------------------------------------
+# 检测工作者（单路流）
+# ---------------------------------------------------------------------------
+
 class DetectionWorker:
-    """单路流的检测工作者"""
+    """单路流的检测工作者，接收 numpy 帧，直接送入检测器"""
 
     def __init__(self, stream_id: int):
         self.stream_id = stream_id
@@ -24,11 +65,12 @@ class DetectionWorker:
         self._detectors: List = []
         self._detection_configs: List[dict] = []
 
-    async def push_frame(self, stream_id: int, frame_jpeg: bytes) -> None:
+    async def push_frame(self, stream_id: int, frame_np: np.ndarray) -> None:
+        """接收 BGR numpy 帧，省去 JPEG 解码开销"""
         if not self._detectors:
             return
         try:
-            self._queue.put_nowait(frame_jpeg)
+            self._queue.put_nowait(frame_np)
         except asyncio.QueueFull:
             pass
 
@@ -52,7 +94,6 @@ class DetectionWorker:
         self._detectors.clear()
 
     def _load_detectors(self) -> None:
-        import json
         from app.detectors.yolo_detector import YoloDetector
         from app.detectors.opencv_detector import IntrusionDetector, CollisionDetector
 
@@ -83,10 +124,9 @@ class DetectionWorker:
 
         while True:
             try:
-                frame_jpeg = await self._queue.get()
-                arr = np.frombuffer(frame_jpeg, dtype=np.uint8)
-                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if frame is None:
+                # 直接获取 numpy 帧，无需 JPEG 解码
+                frame: np.ndarray = await self._queue.get()
+                if frame is None or frame.size == 0:
                     continue
 
                 for detector in self._detectors:
@@ -109,6 +149,20 @@ class DetectionWorker:
                     except Exception as e:
                         logger.warning(f"Detection error: {e}")
                         continue
+
+                    # 无论是否检测到目标，都向浏览器广播当前帧的检测结果
+                    await ws_manager.broadcast({
+                        "type": "detection",
+                        "stream_id": self.stream_id,
+                        "detections": [
+                            {
+                                "label": d.label,
+                                "confidence": round(float(d.confidence), 3),
+                                "bbox": [int(d.x1), int(d.y1), int(d.x2), int(d.y2)],
+                            }
+                            for d in detections
+                        ],
+                    })
 
                     if not detections:
                         continue
@@ -135,6 +189,10 @@ class DetectionWorker:
                 logger.error(f"Detection worker {self.stream_id} error: {e}")
                 await asyncio.sleep(1)
 
+
+# ---------------------------------------------------------------------------
+# 全局检测调度管理器
+# ---------------------------------------------------------------------------
 
 class DetectionManager:
     """全局检测调度管理器"""

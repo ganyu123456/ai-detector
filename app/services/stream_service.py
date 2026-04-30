@@ -1,12 +1,15 @@
 """
-RTSP 流服务：从网关或其他 RTSP 源拉取视频流，解码帧并分发给检测器。
-支持 GPU 硬件解码（NVIDIA CUVID）和 CPU 软解码自动降级。
+RTSP 流服务：从 MediaMTX 拉取 RTSP 视频流，通过独立 CodecContext 实现 NVDEC 硬解码，
+将 numpy 帧直接分发给检测服务（不再做 JPEG 编码），降低 CPU 占用。
+latest_frame（JPEG）仅供 snapshot 端点使用，按需编码。
 """
 import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Awaitable
+from typing import Callable, Dict, List, Optional
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +21,8 @@ class StreamState:
     rtsp_url: str
     status: str = "stopped"       # stopped | starting | running | error
     error_msg: str = ""
-    latest_frame: Optional[bytes] = None          # 原始分辨率 JPEG，供预览和检测共用
+    latest_frame: Optional[bytes] = None          # JPEG bytes，仅供 snapshot 端点使用
+    latest_np: Optional[np.ndarray] = None        # 最新 BGR numpy 帧
     frame_event: asyncio.Event = field(default_factory=asyncio.Event)
     fps: float = 0.0
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -92,6 +96,7 @@ class StreamManager:
                 pass
         state.status = "stopped"
         state.latest_frame = None
+        state.latest_np = None
         logger.info(f"Stream {stream_id} stopped")
 
     async def start_all_enabled(self) -> None:
@@ -121,68 +126,73 @@ class StreamManager:
                 f"decoder={decoder_name} hw={use_hw}"
             )
 
-            def _open_container(force_sw: bool = False):
-                """打开 RTSP 容器，可选强制软解。"""
-                opts = {
-                    "rtsp_transport": "tcp",
-                    "stimeout": "5000000",
-                    "fflags": "nobuffer",
-                    "flags": "low_delay",
-                }
-                container = av.open(state.rtsp_url, options=opts)
-                if not force_sw and use_hw:
-                    # 尝试为视频流指定硬件解码器
-                    try:
-                        vstream = container.streams.video[0]
-                        vstream.codec_context.codec = av.Codec(decoder_name, "r")
-                    except Exception as e:
-                        logger.debug(f"HW codec attach failed ({e}), will use default")
-                return container
+            rtsp_opts = {
+                "rtsp_transport": "tcp",
+                "stimeout": "5000000",
+                "fflags": "nobuffer",
+                "flags": "low_delay",
+            }
 
-            # 优先尝试硬解，失败则软解重试
+            # 尝试硬解优先，失败自动降级软解
             for attempt, force_sw in enumerate([False, True]):
                 if attempt == 1:
-                    logger.info(f"Stream {state.stream_id}: retrying with software decode")
+                    logger.info(f"Stream {state.stream_id}: falling back to software decode")
                 try:
-                    container = _open_container(force_sw=force_sw)
-                    _decode_loop(container, cv2)
+                    container = av.open(state.rtsp_url, options=rtsp_opts)
+                    vstream = container.streams.video[0]
+
+                    hw_ctx = None
+                    if use_hw and not force_sw:
+                        hw_ctx = _try_create_hw_context(decoder_name, vstream)
+
+                    _decode_loop(container, vstream, hw_ctx, cv2)
                     container.close()
+                    if hw_ctx is not None:
+                        hw_ctx.close()
                     break
                 except Exception as e:
                     if attempt == 0 and use_hw:
-                        logger.warning(f"Stream {state.stream_id} hw decode error: {e}, falling back to SW")
+                        logger.warning(
+                            f"Stream {state.stream_id} hw decode error: {e}, retrying SW"
+                        )
                         continue
                     asyncio.run_coroutine_threadsafe(_set_error(str(e)), loop)
                     break
 
-        def _decode_loop(container, cv2):
-            for packet in container.demux(video=0):
+        def _decode_loop(container, vstream, hw_ctx, cv2):
+            """解码循环：优先使用独立 hw_ctx 解码，否则用容器默认解码"""
+            for packet in container.demux(vstream):
                 if state.status not in ("running", "starting"):
                     break
                 try:
-                    for frame in packet.decode():
-                        bgr = frame.to_ndarray(format="bgr24")
+                    decoder = hw_ctx if hw_ctx is not None else vstream.codec_context
+                    for frame in decoder.decode(packet):
+                        bgr: np.ndarray = frame.to_ndarray(format="bgr24")
+
+                        # 编码 JPEG 供 snapshot 端点使用（每帧一次，成本低于 MJPEG 推流）
                         ret, jpeg = cv2.imencode(
                             ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85]
                         )
-                        if ret:
-                            jpeg_bytes = jpeg.tobytes()
-                            asyncio.run_coroutine_threadsafe(
-                                _dispatch_frame(jpeg_bytes), loop
-                            )
+                        jpeg_bytes = jpeg.tobytes() if ret else None
+
+                        asyncio.run_coroutine_threadsafe(
+                            _dispatch_frame(bgr, jpeg_bytes), loop
+                        )
                 except Exception:
                     continue
 
-        async def _dispatch_frame(data: bytes) -> None:
-            state.latest_frame = data
+        async def _dispatch_frame(bgr: np.ndarray, jpeg_bytes: Optional[bytes]) -> None:
+            state.latest_np = bgr
+            if jpeg_bytes:
+                state.latest_frame = jpeg_bytes
             state.update_fps()
-            # 通知所有等待新帧的协程（MJPEG generator 使用）
+            # 通知 snapshot 等待者（原 MJPEG generator 已移除）
             state.frame_event.set()
             state.frame_event.clear()
-            # 异步分发给检测 worker（不阻塞预览）
+            # 将 numpy 帧分发给检测 worker
             for cb in list(state._frame_callbacks):
                 try:
-                    await cb(state.stream_id, data)
+                    await cb(state.stream_id, bgr)
                 except Exception as e:
                     logger.warning(f"Stream {state.stream_id} frame callback error: {e}")
 
@@ -206,11 +216,32 @@ class StreamManager:
                 state.status = "error"
 
 
+def _try_create_hw_context(decoder_name: str, vstream):
+    """
+    创建独立的 NVDEC CodecContext。
+    复制 extradata（SPS/PPS）确保解码器正确初始化。
+    返回 None 表示创建失败，调用方应降级到软解。
+    """
+    try:
+        import av
+        hw_ctx = av.codec.CodecContext.create(decoder_name, "r")
+        # 将容器流的 extradata（SPS/PPS）复制给独立解码器
+        src_extra = vstream.codec_context.extradata
+        if src_extra:
+            hw_ctx.extradata = src_extra
+        hw_ctx.open()
+        logger.info(f"NVDEC hardware decoder '{decoder_name}' initialized successfully")
+        return hw_ctx
+    except Exception as e:
+        logger.warning(f"Failed to create hw CodecContext '{decoder_name}': {e}")
+        return None
+
+
 def _pick_video_decoder() -> tuple[str, bool]:
     """
     探测最优视频解码器。
     返回 (decoder_name, use_hardware)。
-    优先使用 PyAV 内置的 codec 注册表，不依赖外部 ffmpeg 命令。
+    使用 PyAV 内置 codec 注册表，不依赖外部 ffmpeg 命令。
     """
     try:
         import av

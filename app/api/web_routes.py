@@ -83,10 +83,15 @@ async def preview_page(request: Request, db: AsyncSession = Depends(get_db)):
         d["status"] = state.status if state else "stopped"
         d["fps"] = state.fps if state else 0.0
         items.append(d)
+    from app.config import settings as _s
     return templates.TemplateResponse(
         request=request,
         name="preview.html",
-        context={"streams": items, "active": "preview"},
+        context={
+            "streams": items,
+            "active": "preview",
+            "mediamtx_webrtc_url": _s.MEDIAMTX_WEBRTC_URL,
+        },
     )
 
 

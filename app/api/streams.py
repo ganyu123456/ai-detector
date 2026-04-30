@@ -1,10 +1,10 @@
-"""流源管理 API：CRUD + 连通性测试 + MJPEG 预览 + 从网关自动同步"""
+"""流源管理 API：CRUD + 连通性测试 + snapshot + 从网关自动同步"""
 import asyncio
 from typing import Optional
 
 import aiohttp
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -162,40 +162,6 @@ async def get_snapshot(stream_id: int):
         raise HTTPException(503, "No frame available yet")
     return Response(content=state.latest_frame, media_type="image/jpeg")
 
-
-@router.get("/{stream_id}/mjpeg")
-async def mjpeg_stream(stream_id: int):
-    """MJPEG 实时预览流（浏览器直接播放）"""
-    state = stream_manager.get_state(stream_id)
-    if not state:
-        raise HTTPException(404, "Stream not found")
-
-    async def _generator():
-        consecutive_idle = 0
-        while True:
-            # 等待新帧事件，超时 1 秒用于检测流是否已停止
-            try:
-                await asyncio.wait_for(state.frame_event.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
-                consecutive_idle += 1
-                if state.status not in ("running", "starting") and consecutive_idle >= 10:
-                    break
-                continue
-
-            consecutive_idle = 0
-            frame = state.latest_frame
-            if frame:
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n"
-                    + frame
-                    + b"\r\n"
-                )
-
-    return StreamingResponse(
-        _generator(),
-        media_type="multipart/x-mixed-replace;boundary=frame",
-    )
 
 
 class GatewaySyncBody(BaseModel):

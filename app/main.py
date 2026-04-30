@@ -35,8 +35,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
 
-        # 放行登录页及静态资源
-        if path == "/login" or path.startswith("/static"):
+        # 放行登录页、静态资源及 WebSocket 检测事件流
+        if path == "/login" or path.startswith("/static") or path.startswith("/ws/"):
             return await call_next(request)
 
         # 校验 session cookie
@@ -167,6 +167,7 @@ from app.api.alerts import router as alerts_router
 from app.api.system import router as system_router
 from app.api.notify import router as notify_router
 from app.api.web_routes import router as web_router
+from app.api.ws import router as ws_router
 
 app.include_router(streams_router)
 app.include_router(detections_router)
@@ -174,6 +175,7 @@ app.include_router(alerts_router)
 app.include_router(system_router)
 app.include_router(notify_router)
 app.include_router(web_router)
+app.include_router(ws_router)
 
 
 if __name__ == "__main__":
