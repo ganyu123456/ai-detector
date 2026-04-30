@@ -21,8 +21,7 @@ class StreamState:
     rtsp_url: str
     status: str = "stopped"       # stopped | starting | running | error
     error_msg: str = ""
-    latest_frame: Optional[bytes] = None          # JPEG bytes，仅供 snapshot 端点使用
-    latest_np: Optional[np.ndarray] = None        # 最新 BGR numpy 帧
+    latest_np: Optional[np.ndarray] = None        # 最新 BGR numpy 帧（snapshot 按需编码 JPEG）
     frame_event: asyncio.Event = field(default_factory=asyncio.Event)
     fps: float = 0.0
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -95,7 +94,6 @@ class StreamManager:
             except (asyncio.CancelledError, Exception):
                 pass
         state.status = "stopped"
-        state.latest_frame = None
         state.latest_np = None
         logger.info(f"Stream {stream_id} stopped")
 
@@ -160,31 +158,33 @@ class StreamManager:
                     break
 
         def _decode_loop(container, vstream, hw_ctx, cv2):
-            """解码循环：优先使用独立 hw_ctx 解码，否则用容器默认解码"""
+            """解码循环：优先使用独立 hw_ctx 解码，否则用容器默认解码。
+            帧采样节流：仅当距上次 to_ndarray 超过 FRAME_SAMPLE_INTERVAL 才执行
+            GPU→CPU 内存拷贝，其余帧由 NVDEC 解码后直接丢弃，大幅减少 PCIe DMA 次数。
+            """
+            from app.config import settings as _cfg
+            sample_interval: float = _cfg.FRAME_SAMPLE_INTERVAL
+            last_sample_ts: float = 0.0
+
             for packet in container.demux(vstream):
                 if state.status not in ("running", "starting"):
                     break
                 try:
                     decoder = hw_ctx if hw_ctx is not None else vstream.codec_context
                     for frame in decoder.decode(packet):
+                        now = time.monotonic()
+                        if now - last_sample_ts < sample_interval:
+                            continue  # 丢弃此帧，跳过 GPU→CPU 拷贝
+                        last_sample_ts = now
                         bgr: np.ndarray = frame.to_ndarray(format="bgr24")
-
-                        # 编码 JPEG 供 snapshot 端点使用（每帧一次，成本低于 MJPEG 推流）
-                        ret, jpeg = cv2.imencode(
-                            ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85]
-                        )
-                        jpeg_bytes = jpeg.tobytes() if ret else None
-
                         asyncio.run_coroutine_threadsafe(
-                            _dispatch_frame(bgr, jpeg_bytes), loop
+                            _dispatch_frame(bgr), loop
                         )
                 except Exception:
                     continue
 
-        async def _dispatch_frame(bgr: np.ndarray, jpeg_bytes: Optional[bytes]) -> None:
+        async def _dispatch_frame(bgr: np.ndarray) -> None:
             state.latest_np = bgr
-            if jpeg_bytes:
-                state.latest_frame = jpeg_bytes
             state.update_fps()
             # 通知 snapshot 等待者（原 MJPEG generator 已移除）
             state.frame_event.set()

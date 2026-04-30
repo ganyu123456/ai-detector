@@ -75,6 +75,10 @@ class Settings:
     # 帧队列大小
     FRAME_QUEUE_SIZE: int = int(os.getenv("FRAME_QUEUE_SIZE", "2"))
 
+    # 帧采样间隔（秒）：控制 GPU→CPU to_ndarray 调用频率，默认 0.5s（2fps 采样）
+    # 需 <= detect_interval，否则可能漏帧；降低此值可提高检测实时性，但会增加 CPU 占用
+    FRAME_SAMPLE_INTERVAL: float = float(os.getenv("FRAME_SAMPLE_INTERVAL", "0.5"))
+
     # MediaMTX WebRTC 基础 URL，浏览器通过此地址拉取 WHEP 流
     MEDIAMTX_WEBRTC_URL: str = os.getenv("MEDIAMTX_WEBRTC_URL", "http://192.168.2.23:8889")
 

@@ -154,13 +154,27 @@ async def test_stream_connectivity(stream_id: int, db: AsyncSession = Depends(ge
 
 @router.get("/{stream_id}/snapshot")
 async def get_snapshot(stream_id: int):
-    """获取最新一帧 JPEG 快照"""
+    """获取最新一帧 JPEG 快照（按需编码，不再每帧预编码）"""
+    import asyncio
+    import cv2
     state = stream_manager.get_state(stream_id)
     if not state:
         raise HTTPException(404, "Stream not found")
-    if not state.latest_frame:
+    if state.latest_np is None:
         raise HTTPException(503, "No frame available yet")
-    return Response(content=state.latest_frame, media_type="image/jpeg")
+
+    # 在线程池里编码，避免阻塞事件循环
+    loop = asyncio.get_running_loop()
+    frame = state.latest_np
+
+    def _encode():
+        ret, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return buf.tobytes() if ret else None
+
+    jpeg_bytes = await loop.run_in_executor(None, _encode)
+    if not jpeg_bytes:
+        raise HTTPException(500, "Failed to encode snapshot")
+    return Response(content=jpeg_bytes, media_type="image/jpeg")
 
 
 
