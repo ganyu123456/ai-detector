@@ -18,7 +18,7 @@
     background: rgba(255,255,255,.02);
   }
   .stream-card-header .name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
-  .stream-card-body { position: relative; background: #000; aspect-ratio: 16/9; }
+  .stream-card-body { position: relative; background: #000; aspect-ratio: 16/9; overflow: hidden; }
 
   /* 视频+画布叠加 */
   .video-wrap {
@@ -47,6 +47,17 @@
     color: #484f58; font-size: 13px;
   }
   .placeholder i { font-size: 36px; }
+
+  /* 重连时动态插入的占位层，绝对定位覆盖在视频上方，不影响卡片高度 */
+  .placeholder-dynamic {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px;
+    background: rgba(0,0,0,0.75);
+    color: #6e7681; font-size: 13px;
+    z-index: 10;
+  }
+  .placeholder-dynamic i { font-size: 28px; }
 
   .stream-card-footer {
     display: flex; align-items: center; justify-content: space-between;
@@ -251,6 +262,12 @@ async function connectWhep(streamId, rtspUrl) {
     if (evt.track.kind === 'video') {
       video.srcObject = new MediaStream([evt.track]);
       console.log(`Stream ${streamId}: WebRTC track received`);
+      // 移除重连占位层（如果存在）
+      const body = video.closest('.stream-card-body');
+      if (body) {
+        const ph = body.querySelector('.placeholder-dynamic');
+        if (ph) ph.remove();
+      }
     }
   };
 
