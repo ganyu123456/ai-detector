@@ -75,8 +75,18 @@ class StreamManager:
         state = self._streams.get(stream_id)
         if not state:
             return False
-        if state.status == "running":
+
+        # 正常运行中直接返回，不重复启动
+        if state.status == "running" and state._task and not state._task.done():
             return True
+
+        # 若有旧 Task 仍在运行（如 error 重试等待中），先取消，避免并发重连
+        if state._task and not state._task.done():
+            state._task.cancel()
+            try:
+                await state._task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         state.status = "starting"
         state.error_msg = ""
@@ -226,10 +236,14 @@ class StreamManager:
                         f"Stream {state.stream_id} reconnecting (attempt #{attempt_count})"
                     )
                 await loop.run_in_executor(None, _pull_and_decode)
-                # _pull_and_decode 正常返回（流主动停止），退出循环
-                logger.info(f"Stream {state.stream_id} decode loop exited normally")
 
-                # 流恢复正常：若之前曾离线并发过通知，发一次"恢复"通知
+                # _pull_and_decode 正常返回（收到 EOF / RTSP Teardown）
+                # 不代表用户主动停止，应继续重连，除非已被手动 stop
+                if state.status == "stopped":
+                    logger.info(f"Stream {state.stream_id} was stopped, exiting")
+                    break
+
+                # 流曾成功运行后意外断开：若之前发过离线通知，先发恢复通知
                 if notify_count > 0:
                     try:
                         await notify_service.send_system_event(
@@ -241,9 +255,26 @@ class StreamManager:
                             ),
                         )
                         logger.info(f"Stream {state.stream_id} recovery notification sent")
+                        notify_count = 0       # 重置，下次离线重新计数
+                        last_notify_ts = 0.0
                     except Exception as ne:
                         logger.warning(f"Stream {state.stream_id} recovery notify failed: {ne}")
-                break
+
+                # 视为意外断开，触发重连（与抛异常时行为一致）
+                attempt_count += 1
+                state.status = "error"
+                logger.warning(
+                    f"Stream {state.stream_id} ended unexpectedly (EOF/disconnect), "
+                    f"retrying in {retry_delay}s (attempt #{attempt_count})"
+                )
+                try:
+                    await asyncio.sleep(retry_delay)
+                except asyncio.CancelledError:
+                    logger.info(f"Stream {state.stream_id} cancelled during retry wait")
+                    break
+                if state.status == "stopped":
+                    break
+                continue
 
             except asyncio.CancelledError:
                 logger.info(f"Stream {state.stream_id} cancelled")
